@@ -996,10 +996,9 @@ contract is recorded in
 [ADR 0003](docs/decisions/0003-python-and-packaging.md). User projects do not
 need their own virtual environments.
 
-The initial platform matrix covers Linux x86-64, Windows x86-64, and macOS on
-both x86-64 and arm64. CPython's SQLite must pass the project's FTS5 behavior
-probe on both supported Python versions for every target. The exact matrix and
-failure contract are defined in
+The initial supported platform is Linux x86-64. CPython's SQLite must pass the
+project's FTS5 behavior probe on both supported Python versions. The exact
+platform and failure contract are defined in
 [ADR 0004](docs/decisions/0004-platform-and-fts5.md).
 
 The semantic-retrieval milestone additionally evaluates the pinned UltraRAG

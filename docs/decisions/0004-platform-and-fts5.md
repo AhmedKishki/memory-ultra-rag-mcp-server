@@ -4,21 +4,14 @@ Status: proposed pending the first complete CI matrix
 
 Date: 2026-09-18
 
-## Supported platform matrix
+## Supported platform
 
-The initial package supports these 64-bit CPython targets:
+The initial package supports Linux on x86-64 with CPython 3.11 and 3.12.
+Ubuntu 24.04 x64 is the repeatable CI representative.
 
-| Operating system | Architecture | CI representative |
-| --- | --- | --- |
-| Linux | x86-64 | Ubuntu 24.04 x64 |
-| Windows | x86-64 | Windows Server 2025 x64 |
-| macOS | arm64 | macOS 15 Apple silicon |
-| macOS | x86-64 | macOS 15 Intel |
-
-Each target must pass on CPython 3.11 and 3.12. Linux arm64, Windows arm64,
-32-bit systems, PyPy, and other operating systems are unsupported until their
-complete dependency and behavior matrices pass. They may work, but the project
-does not promise or silently infer support.
+Linux arm64, 32-bit Linux, Windows, macOS, PyPy, and other operating systems are
+unsupported until their complete dependency and behavior matrices pass. They
+may work, but the project does not promise or silently infer support.
 
 The CI operating-system versions are repeatable representatives, not minimum
 end-user OS versions. Minimum OS versions will follow the supported CPython and
@@ -45,7 +38,7 @@ without exposing an identical compile-option string.
 The pure-standard-library probe is
 [`scripts/check_sqlite_fts5.py`](../../scripts/check_sqlite_fts5.py). The
 [`platform-prerequisites` workflow](../../.github/workflows/platform-prerequisites.yml)
-runs it across all eight OS/architecture/Python combinations. The same probe is
+runs it on Linux x86-64 with both supported Python versions. The same probe is
 available locally:
 
 ```bash
@@ -65,6 +58,6 @@ probe. A new target becomes supported only after its complete matrix passes.
 
 ## Evidence
 
-The decision becomes accepted only after every job in the first GitHub Actions
-matrix passes. Record the workflow URL, exact interpreter and SQLite versions,
-and local Linux result here before checking the TODO item complete.
+The decision becomes accepted only after both jobs in the first GitHub Actions
+matrix pass. Record the workflow URL, exact interpreter and SQLite versions,
+and local result here before checking the TODO item complete.

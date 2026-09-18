@@ -10,25 +10,12 @@ permissions:
 
 jobs:
   sqlite-fts5:
-    name: FTS5 · ${{ matrix.target.name }} · Python ${{ matrix.python }}
-    runs-on: ${{ matrix.target.runner }}
+    name: FTS5 · Linux x64 · Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - name: Linux x64
-            runner: ubuntu-24.04
-            architecture: x64
-          - name: Windows x64
-            runner: windows-2025
-            architecture: x64
-          - name: macOS arm64
-            runner: macos-15
-            architecture: arm64
-          - name: macOS x64
-            runner: macos-15-intel
-            architecture: x64
         python:
           - "3.11"
           - "3.12"
@@ -41,7 +28,7 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
-          architecture: ${{ matrix.target.architecture }}
+          architecture: x64
 
       - name: Verify SQLite FTS5
         run: python scripts/check_sqlite_fts5.py
