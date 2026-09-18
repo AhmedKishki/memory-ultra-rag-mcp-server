@@ -35,7 +35,8 @@ documentation are complete.
       ([ADR 0001](docs/decisions/0001-ultrarag-boundary.md)).
 - [x] Pin the supported UltraRAG version/commit and dependency versions
       ([ADR 0002](docs/decisions/0002-dependency-pins.md)).
-- [ ] Add the required license and UltraRAG attribution/NOTICE material.
+- [x] Add the required [license](LICENSE) and UltraRAG
+      [attribution/NOTICE](NOTICE) material.
 - [ ] Choose and document supported Python versions and packaging with `uv`.
 - [ ] Confirm SQLite FTS5 on every supported platform.
 - [ ] Define the user registry and OS-specific global-memory data locations.

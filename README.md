@@ -212,13 +212,15 @@ behavior contract.
 
 ## UltraRAG credit
 
-This project directly builds on [UltraRAG](https://github.com/OpenBMB/UltraRAG)
-and its [documentation](https://ultrarag.openbmb.cn/). Credit belongs to the
-UltraRAG team and contributors, including the participating organizations named
-by the project: THUNLP, NEUIR, OpenBMB, and AI9stars.
+This independent project follows the modular MCP architecture documented by
+[UltraRAG](https://github.com/OpenBMB/UltraRAG) and plans to evaluate its
+unmodified retriever through UltraRAG's public MCP interface. Credit belongs to
+the UltraRAG team and contributors, including participants from THUNLP, NEUIR,
+OpenBMB, and AI9stars.
 
 The reviewed upstream snapshot is pinned in
-[ADR 0002](docs/decisions/0002-dependency-pins.md); the applicable Apache-2.0
-license and attribution material will be added before code is released. Memory
-UltraRAG MCP is independently maintained and does not imply endorsement by the
-UltraRAG project or its contributors.
+[ADR 0002](docs/decisions/0002-dependency-pins.md). This project is licensed
+under the [Apache License 2.0](LICENSE); [NOTICE](NOTICE) records the full
+UltraRAG attribution, pinned revision, upstream license, and independent-project
+statement. No UltraRAG source is currently copied into or modified by this
+repository.

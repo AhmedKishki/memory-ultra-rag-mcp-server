@@ -140,10 +140,12 @@ UltraRAG snapshot are fixed in
 [ADR 0002](docs/decisions/0002-dependency-pins.md); embedding and vector
 dependencies remain deliberately unselected until Milestone 3.
 
-## 4. Attribution
+## 4. License and attribution
 
-The eventual repository must prominently credit UltraRAG and link to its
-canonical project:
+This repository is licensed under Apache-2.0. The root `LICENSE` contains the
+complete license and `NOTICE` records project and upstream attribution.
+
+The repository prominently credits UltraRAG and links to its canonical project:
 
 - https://github.com/OpenBMB/UltraRAG
 - https://ultrarag.openbmb.cn/
@@ -151,7 +153,10 @@ canonical project:
 Credit must acknowledge the UltraRAG team and contributors and the project's
 stated participating organizations: THUNLP, NEUIR, OpenBMB, and AI9stars. The
 repository must say that this is an independent project and must not imply
-endorsement.
+endorsement. The exact audited UltraRAG revision and archive checksum live in
+ADR 0002 and `NOTICE`. If the deferred retriever snapshot is downloaded or
+redistributed, its own license and notices must be preserved. Dependency or
+snapshot changes require a fresh license and attribution review.
 
 ## 5. One installation, many projects
 

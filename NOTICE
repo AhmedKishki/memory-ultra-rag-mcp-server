@@ -1,0 +1,45 @@
+Memory UltraRAG MCP
+Copyright 2026 Ahmed Kishki
+
+This project is licensed under the Apache License, Version 2.0. See LICENSE.
+
+ULTRARAG ATTRIBUTION
+
+Memory UltraRAG MCP is an independent MCP server inspired by UltraRAG's modular
+MCP architecture. Its planned semantic-retrieval adapter is designed to run a
+verified, unmodified UltraRAG retriever snapshot through UltraRAG's public MCP
+interface. No UltraRAG source code is currently copied into or modified by this
+repository.
+
+UltraRAG is developed by its team and contributors, including participants from:
+
+- THUNLP at Tsinghua University: https://nlp.csai.tsinghua.edu.cn/
+- NEUIR at Northeastern University: https://neuir.github.io/
+- OpenBMB: https://www.openbmb.cn/home
+- AI9stars: https://github.com/AI9Stars
+- The wider contributor community:
+  https://github.com/OpenBMB/UltraRAG/graphs/contributors
+
+Canonical project: https://github.com/OpenBMB/UltraRAG
+Documentation: https://ultrarag.openbmb.cn/
+
+The audited future integration is pinned to:
+
+- UltraRAG package version: 0.3.0.2
+- Commit: 3a709a2aea3fbe46acca59c422621c94b6e86857
+- Source archive:
+  https://github.com/OpenBMB/UltraRAG/archive/3a709a2aea3fbe46acca59c422621c94b6e86857.tar.gz
+- Archive SHA-256:
+  cb7b7b10dd8eacecd43d7e6705baea4cd431710e7016a0b66673c56821accece
+
+UltraRAG is licensed under the Apache License, Version 2.0, and its license
+identifies Copyright 2023 OpenBMB. A downloaded or redistributed UltraRAG
+snapshot remains subject to its own license and notices, which this project will
+preserve. The pinned upstream license is available at:
+
+https://github.com/OpenBMB/UltraRAG/blob/3a709a2aea3fbe46acca59c422621c94b6e86857/LICENSE.txt
+
+Memory UltraRAG MCP is not an official UltraRAG release and is not affiliated
+with or endorsed by UltraRAG, THUNLP, Tsinghua University, NEUIR, Northeastern
+University, OpenBMB, AI9stars, or their contributors. The UltraRAG name is used
+only to describe the project's architectural basis and intended interoperability.

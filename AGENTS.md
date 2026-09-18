@@ -213,5 +213,7 @@ canonical commands rather than inventing alternatives.
 Credit UltraRAG, its contributors, and the organizations named by the project:
 THUNLP, NEUIR, OpenBMB, and AI9stars. Link to the canonical UltraRAG repository
 and documentation. Preserve the independent-project/no-endorsement statement,
-pin the supported upstream version/commit before release, and include all
-license and NOTICE material required by the pinned dependency.
+the root Apache-2.0 `LICENSE`, and the complete root `NOTICE`. Preserve an
+upstream snapshot's own license and notices whenever it is downloaded or
+redistributed. Any direct dependency or UltraRAG snapshot change requires a
+fresh license and attribution review.
