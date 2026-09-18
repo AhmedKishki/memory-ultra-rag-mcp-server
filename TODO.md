@@ -28,7 +28,8 @@ documentation are complete.
 
 ## Milestone 0 — Contracts and measured choices
 
-- [ ] Inspect the pinned UltraRAG MCP, memory, and retrieval public APIs.
+- [x] Inspect the pinned UltraRAG MCP, memory, and retrieval public APIs
+      ([audit](docs/audits/ultrarag-api-audit.md)).
 - [ ] Record which UltraRAG components are reused and why each custom component
       is necessary.
 - [ ] Pin the supported UltraRAG version/commit and dependency versions.
