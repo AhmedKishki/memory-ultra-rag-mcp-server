@@ -1,6 +1,6 @@
 # Memory UltraRAG MCP — Design and Implementation Plan
 
-Status: design phase; not implemented
+Status: design phase; implementation has not started
 
 This document consolidates the agreed design for a standalone,
 CPU-first `memory-ultra-rag-mcp` stdio server. It is a plan, not a description
@@ -11,12 +11,22 @@ of working software.
 Build a durable semantic memory service that an AI agent can use across many
 projects from one installed MCP package.
 
+The service preserves **operational continuity between agent sessions**. Its
+primary content is project status, progress, active rules, preferences, style,
+tone, formatting requirements, decisions, commitments (including theoretical
+and meta-theoretical commitments), procedures, and open questions. Source
+knowledge belongs in a document-oriented RAG and must not be copied into this
+memory merely because it may be useful later.
+
 The server must:
 
 - keep every project's memory physically and logically isolated;
 - provide one deliberately shared global-memory shard;
 - accept explicit memory proposals from an AI agent rather than silently
   recording conversations;
+- treat active rules as first-class operative state at project or global scope;
+- return applicable active rules separately whenever the agent recalls memory
+  or prepares a memory change;
 - turn useful context into typed, atomic, searchable records;
 - merge semantic duplicates instead of accumulating paraphrases;
 - identify contradictions and require the user to resolve them;
@@ -35,9 +45,10 @@ files.
 
 ## 2. Core principle
 
-The canonical object is a **versioned semantic assertion**, not a text chunk.
-The system is a curated memory ledger with a small explicit relation graph and
-rebuildable retrieval indexes.
+The canonical object is a **versioned typed operational record**, not a text
+chunk. It may be a rule, status item, decision, commitment, procedure, or other
+in-scope memory. The system is a curated memory ledger with a small explicit
+relation graph and rebuildable retrieval indexes.
 
 The following invariants govern the design:
 
@@ -52,7 +63,32 @@ The following invariants govern the design:
 9. Project memory never leaks into another project.
 10. Global memory is used only when an agent explicitly requests that scope.
 11. Nothing becomes durable merely because it appeared in a conversation.
-12. Source-document evidence and remembered assertions remain distinct.
+12. Source-document evidence and remembered operational records remain distinct.
+13. The agent decides what is worth proposing, but the user remains the final
+    authority over conflicts, destructive actions, and global rules.
+14. An active rule remains operative until an atomic reviewed replacement or an
+    explicit user-authorized retraction takes effect.
+15. Global memory contains only deliberately global records; it is never an
+    automatic union or scan of all project memories.
+
+## 2.1 Incremental implementation rule
+
+This project must be built as a sequence of small, usable vertical slices. A
+milestone begins only after the previous milestone's acceptance checks pass.
+The first release must not attempt embeddings, graph traversal, global memory,
+compaction, Markdown import, and UI integration simultaneously.
+
+The minimal useful path is:
+
+1. safe project selection and an isolated SQLite ledger;
+2. local rules and operational memories with exact deduplication and FTS search;
+3. agent-mediated semantic reconciliation and contradiction handling;
+4. the physically separate global shard and project/global rule precedence;
+5. relations and bounded path search;
+6. activation, retention, compaction, import/export hardening, and optional UI.
+
+`TODO.md` is the executable checklist. This plan defines the intended end state
+and the constraints that every milestone must preserve.
 
 ## 3. UltraRAG boundary
 
@@ -159,7 +195,7 @@ the registered name, never the stored filesystem path.
 Each initialized project receives a stable manifest such as:
 
 ```text
-<project>/.ultrarag/project.json
+<project>/.memory-rag/project.json
 ```
 
 It contains at least:
@@ -219,7 +255,7 @@ the server must not depend on every MCP client implementing roots correctly.
 All content-bearing project state lives beneath:
 
 ```text
-<project>/.ultrarag/memory/
+<project>/.memory-rag/
 ```
 
 This includes the database, indexes, locks, content-bearing logs, import reports,
@@ -232,7 +268,7 @@ not one database that relies only on a `WHERE project_id = ...` condition.
 There is no cross-project project-memory search. A missing index or database
 must never cause fallback to another project.
 
-### 5.5 Shared MCP project contract
+### 5.5 Project-oriented MCP contract
 
 Project initialization and isolation are infrastructure behavior, not a RAG
 feature. All project-oriented MCP servers must therefore present the same
@@ -242,32 +278,31 @@ high-level lifecycle:
 2. bind the stdio session to its stable project ID;
 3. expose the active identity through `project_status`;
 4. omit paths from ordinary tools;
-5. keep content-bearing state in a server-specific directory beneath the
-   project's `.ultrarag/` directory; and
+5. keep content-bearing state in exactly one server-specific hidden directory;
+   and
 6. reject any operation that could read or write another project's content.
 
-The server-specific state layout is:
+For this server the complete project-owned layout is:
 
 ```text
-<project>/.ultrarag/
+<project>/.memory-rag/
 ├── project.json
-├── vanilla/
-├── research/
-└── memory/
+├── memory.sqlite3
+├── project.lock
+├── config.json
+├── exports/
+└── runtime/
+    ├── indexes/
+    │   ├── current.json
+    │   └── generations/
+    └── logs/
 ```
 
-The research and vanilla MCP servers should behave identically from the user's
-perspective even though their internal tools differ. Research continues to
-apply its PDF/EPUB and evidence policies. Vanilla continues to expose upstream
-UltraRAG features, but its gateway must enforce the active project boundary on
-all filesystem-bearing arguments and stateful external backends.
-
-For vanilla, this project guard is an explicitly documented gateway constraint;
-it does not modify UltraRAG source code. Write paths must remain inside the
-active project. Read paths must be limited to the active project plus narrowly
-allowlisted, content-free runtime and model caches. External collections, where
-supported, must be namespaced by project ID or refused when isolation cannot be
-guaranteed.
+No second project-state directory is created. Portable exports and identity
+live beside disposable runtime state, but their roles remain explicit. Shared
+model files may live in a user cache because they contain no project content.
+Other project-oriented MCP servers may use their own state-directory names;
+they need only preserve the same isolation and name-based lifecycle behavior.
 
 ## 6. Memory scopes and levels
 
@@ -281,13 +316,16 @@ Scope and memory class are independent dimensions.
 - `global`: durable state in the single shared global-memory shard.
 
 Project memory and global memory use physically separate SQLite databases and
-separate indexes.
+separate indexes. "Local" means all in-scope operational memory for the active
+project, not all factual knowledge connected to that project. "Global" means
+records deliberately declared applicable across projects, not a copy or union
+of local memory.
 
 ### 6.2 Class
 
 - `working`: bounded active context; aggressively consolidated or evicted.
 - `episodic`: events, attempts, outcomes, and experience.
-- `semantic`: facts, definitions, decisions, constraints, and terminology.
+- `semantic`: decisions, commitments, constraints, and project conventions.
 - `procedural`: workflows, instructions, and methods.
 - `pinned`: a retention modifier; never automatically removed.
 
@@ -336,21 +374,66 @@ Relations may be stored project-to-project and global-to-global. A project may
 reference a global memory. The global shard must not point back to a
 project-local record, because that would couple global state to one project.
 
+### 6.5 Operative rules and operational memory
+
+Rules are not ordinary search hits. An active rule is operative state that the
+agent must receive separately from similarity-ranked memories whenever it:
+
+- recalls context for a task;
+- proposes, corrects, or removes memory;
+- prepares a project-changing action; or
+- explicitly asks for applicable rules.
+
+The server returns all applicable active rules in a structured field, ordered
+by scope and priority. Applicability is determined by explicit
+scope, optional task conditions, and project identity—not by embedding
+similarity alone. A project rule may explicitly override a global rule for that
+project. The response retains both records and states why the project rule wins.
+If a protocol safety limit is reached, the response must say it is incomplete
+and provide continuation; the agent must finish loading rules before acting.
+
+Rules can be added, amended, superseded, or retracted, but an existing active
+rule remains operative until its reviewed replacement or retraction commits in
+the same transaction. A pending or contradictory proposal never creates a
+gap, silently displaces the rule, or becomes operative by itself. Active rules
+do not expire, decay, or enter automatic pruning unless the rule itself carries
+an explicit validity condition accepted by the user.
+
+The primary record types are:
+
+- `rule`: an operative instruction or prohibition;
+- `status`: the current state of a project or work item;
+- `progress`: a completed step or material advancement;
+- `preference`: a durable user choice;
+- `style`, `tone`, and `formatting`: persistent output requirements;
+- `decision`: a choice and, when useful, its rationale;
+- `commitment`: a durable practical, theoretical, or meta-theoretical stance;
+- `procedure`: a reusable way of working;
+- `event` or `outcome`: experience worth retaining; and
+- `open_question`: an unresolved issue worth revisiting.
+
+This taxonomy deliberately excludes document excerpts, literature notes, and
+general factual corpora. The memory may retain a short reference to external
+evidence when it explains a decision or commitment, but the underlying source
+belongs in the appropriate knowledge-oriented RAG.
+
 ## 7. Canonical data model
 
 The initial authoritative store is SQLite with foreign keys and transactional
-writes. A possible project layout is:
+writes. The project layout is:
 
 ```text
-<project>/.ultrarag/memory/
+<project>/.memory-rag/
+├── project.json
 ├── memory.sqlite3
 ├── project.lock
 ├── config.json
-├── indexes/
-│   ├── current.json
-│   └── generations/
-├── logs/
-└── exports/
+├── exports/
+└── runtime/
+    ├── indexes/
+    │   ├── current.json
+    │   └── generations/
+    └── logs/
 ```
 
 The configurable global root uses the same internal layout but has no project
@@ -371,8 +454,9 @@ Every durable memory needs at least:
 
 - stable namespaced memory ID;
 - scope and class;
-- type, such as fact, preference, decision, constraint, hypothesis, procedure,
-  event, outcome, terminology, or open question;
+- type, such as rule, status, progress, preference, style, tone, formatting,
+  decision, commitment, constraint, hypothesis, procedure, event, outcome, or
+  open question;
 - atomic statement or structured subject/predicate/object form;
 - project/global namespace;
 - lifecycle and review state;
@@ -382,6 +466,10 @@ Every durable memory needs at least:
 - tags or normalized entities;
 - activation counters; and
 - a content fingerprint used only for exact duplicate detection.
+
+Rules additionally carry priority, applicability conditions, and an operative
+state. Those fields are explicit; the server must not infer hidden precedence
+from vector scores.
 
 Suggested lifecycle states:
 
@@ -406,7 +494,9 @@ against bloat.
 The AI agent determines whether supplied context contains durable information
 and proposes atomic records. The agent is responsible for meaning-level work:
 
-- separating facts, decisions, preferences, procedures, hypotheses, and events;
+- deciding whether anything in the supplied context deserves durable memory;
+- separating rules, status, progress, decisions, commitments, preferences,
+  procedures, hypotheses, and events;
 - preserving qualifications and scope;
 - normalizing entities and terminology;
 - explaining proposed relations;
@@ -436,12 +526,12 @@ The server:
 
 Normally retain:
 
-- explicit user preferences and durable instructions;
+- active project or global rules;
+- explicit user preferences, style, tone, and formatting requirements;
+- project status and material progress needed in a later session;
 - project decisions and their reasons;
-- project constraints and important state changes;
-- verified project facts;
+- project constraints, commitments, and important state changes;
 - procedures that succeeded or failed, including their conditions;
-- terminology and definitions used by the project;
 - explicitly marked hypotheses;
 - unresolved questions worth revisiting; and
 - references to external evidence without presenting the memory itself as that
@@ -452,9 +542,10 @@ Normally reject or ignore:
 - greetings and conversational filler;
 - generated prose and full assistant responses;
 - repeated restatements from the same origin;
-- temporary logs, progress messages, and raw tool output;
+- transient status chatter, low-value progress messages, and raw tool output;
 - speculative brainstorming represented as fact;
-- source material already stored in a document knowledge base;
+- document excerpts, literature notes, standalone factual knowledge, or source
+  material that belongs in a knowledge-oriented RAG;
 - unsupported claims invented by an agent; and
 - credentials, secrets, or sensitive values not explicitly intended for
   durable storage.
@@ -462,6 +553,11 @@ Normally reject or ignore:
 An explicit user request to remember something is presumed intentional, but the
 server still canonicalizes it, checks for conflicts and duplication, and warns
 about sensitive or obviously transient content.
+
+The agent's discretion is an admission filter, not final authority. The agent
+may decide that a message contains nothing durable and make no proposal. The
+server checks structure and prior records. The user remains authoritative over
+ambiguous conflicts, destructive changes, and global-scope rules.
 
 ## 9. Write and reconciliation workflow
 
@@ -475,19 +571,21 @@ The preferred portable workflow has two phases.
    explicit.
 4. The server validates the proposal and retrieves possible existing matches
    using exact fingerprints, lexical search, embeddings, and entity keys.
-5. The server returns a comparison packet without writing an active memory.
+5. The server returns a comparison packet and all applicable active rules
+   without writing an active memory.
 
 ### Phase B: reconcile and commit
 
 6. The agent compares meanings and reports one disposition per proposal:
    `new`, `equivalent`, `refinement`, or `contradiction`.
 7. The server validates the requested transition.
-8. New assertions are created; equivalent assertions merge; refinements create
+8. New records are created; equivalent records merge; refinements create
    revisions; contradictions become pending conflicts.
 9. Canonical changes commit transactionally.
 10. Lexical and dense indexes update or build a verified next generation.
 11. The server returns stable IDs, resulting states, reasons, index state, and
-    required user actions.
+    required user actions, again separating applicable rules from ranked
+    memory matches.
 
 An exact repetition from the same provenance creates neither a new row nor
 artificial reinforcement. Independent confirmation may add provenance and
@@ -496,6 +594,10 @@ confirmation strength. It does not count as usage.
 If dense indexing fails after a canonical commit, the record remains safe in
 SQLite, the dense index is marked stale, and status reports the problem. The
 server must never silently point at a partially built index.
+
+The first local-memory release performs exact deduplication and FTS retrieval
+only. Semantic candidates are added later without changing the canonical
+ledger or the two-phase contract.
 
 ## 10. Contradictions, corrections, and supersession
 
@@ -519,6 +621,11 @@ The user may also provide a custom resolution.
 Corrections create revisions; they do not rewrite history invisibly.
 Superseded and retracted records leave normal retrieval but remain available to
 audit tools subject to retention policy.
+
+For a rule conflict, the previously active rule remains operative while the
+case is open. A resolution that changes the rule activates the replacement and
+supersedes the old revision atomically, so there is never a moment when neither
+rule applies.
 
 ## 11. Relations and graph search
 
@@ -621,6 +728,10 @@ Embeddings generate candidates. They do not decide truth, equivalence,
 contradiction, causality, or trustworthiness. Meaning-level reconciliation is
 performed by the agent and conflict decisions remain user-mediated.
 
+Applicable rules bypass relevance thresholds and are returned in their own
+field. Lexical, dense, and graph retrieval rank non-rule operational memory;
+they must never make a rule operative or suppress an applicable active rule.
+
 The exact embedding model, vector index, fusion method, candidate limits, and
 CPU performance targets must be measured and pinned during implementation.
 
@@ -694,8 +805,15 @@ compaction requires explicit confirmation and creates an audit entry.
 
 ## 15. What search returns
 
-The MCP server returns structured memory evidence, not a generated prose answer.
-Each result includes at least:
+The MCP server returns structured operational memory, not a generated prose
+answer. A recall response contains two distinct parts:
+
+1. `applicable_rules`: all bounded, applicable active project and requested
+   global rules, including precedence and override information; and
+2. `memories`: relevance-ranked status, progress, decisions, commitments,
+   preferences, procedures, outcomes, and open questions.
+
+Each memory result includes at least:
 
 - memory ID and scope;
 - canonical statement and structured fields;
@@ -715,13 +833,21 @@ Remembered text must never be represented as document evidence merely because
 it contains a citation. Evidence references are links for follow-up, not proof
 that the memory is a verified source passage.
 
-## 16. Raw context and Markdown
+## 16. Raw context, export, and Markdown import
 
 The normal server does not ingest files. It receives explicit context or
 structured proposals from the AI agent.
 
-If bulk Markdown migration is added later, it must be a separate, explicit
-workflow. It must not turn every sentence or fixed-size chunk into memory.
+Every usable release provides a deterministic, human-readable Markdown export.
+It groups records by scope and type, clearly marks active rules, includes stable
+IDs and lifecycle states, and describes unresolved conflicts without silently
+resolving them. Export is a snapshot for inspection and transfer; SQLite remains
+authoritative.
+
+Markdown import is a later, separate, explicit workflow. It accepts this
+server's export format first. It must stage and reconcile changes rather than
+overwrite the database, and it must not turn every sentence or fixed-size chunk
+into memory.
 
 A semantic import would:
 
@@ -736,18 +862,21 @@ A semantic import would:
 8. present uncertain and conflicting proposals for review; and
 9. commit only the distilled accepted records.
 
-The original Markdown remains external provenance. Rejected prose is summarized
+External Markdown remains external provenance. Rejected prose is summarized
 in an import report rather than stored as inactive memory, because storing every
 rejection would recreate the bloat problem.
 
 Embeddings help locate paraphrases but cannot replace semantic extraction and
-comparison. A portable first release should defer bulk Markdown import rather
-than introduce a hidden second language-model dependency.
+comparison. The first release exports Markdown but defers import until the
+reconciliation path is proven. Arbitrary prose import remains optional and must
+not introduce a hidden second language-model dependency.
 
 ## 17. Proposed MCP surface
 
 Names and schemas remain provisional until implementation, but the capability
-boundary should be:
+boundary should be as follows. Tools are introduced only in the milestone that
+can support their full contract; an early release must not expose placeholder
+tools.
 
 ### Project lifecycle
 
@@ -770,7 +899,8 @@ boundary should be:
 
 ### Retrieval and graph
 
-- `search_memory`: search project by default, optionally project plus global.
+- `recall_memory`: return applicable rules and relevant operational memory;
+  search project by default and optionally include the global shard.
 - `get_memory`: retrieve one record, revisions, provenance, and direct edges.
 - `list_memories`: filtered inspection, not an unbounded dump.
 - `find_relation_paths`: bounded direct-edge graph traversal.
@@ -782,10 +912,17 @@ boundary should be:
 - `resolve_conflict`
 - `compact_memory`, defaulting to dry-run
 - `rebuild_indexes`
-- `export_memory`, producing a human-readable representation
+- `export_memory`, producing deterministic human-readable Markdown
+- `import_memory`, staging and reconciling a compatible Markdown export
 
 All tool parameters require clear Pydantic/MCP descriptions. Mutating tools
 must accurately set read-only, destructive, idempotent, and open-world hints.
+
+The first end-to-end local-memory slice needs only project lifecycle,
+`propose_memory`, `commit_memory`, `recall_memory`, `get_memory`,
+`list_memories`, `correct_memory`, `retract_memory`, and `export_memory`.
+Global, graph, activation, compaction, and import tools follow only after their
+respective acceptance gates pass.
 
 ## 18. Agent operating contract
 
@@ -793,18 +930,21 @@ Server instructions and the agent guide must require the agent to:
 
 1. initialize the exact project by name before project operations;
 2. show the active project when it could be ambiguous;
-3. use project scope unless global scope is clearly intended;
-4. never pass or invent storage paths for ordinary calls;
-5. extract atomic proposals instead of storing entire messages;
-6. preserve qualifications, origin, and uncertainty;
-7. inspect returned comparison candidates semantically;
-8. never treat embedding similarity as a final duplicate decision;
-9. present exactly three recommended choices for a contradiction;
-10. wait for the user's explicit conflict decision;
-11. cite memory IDs when relying on memory;
-12. call `record_memory_use` only for records actually used;
-13. distinguish remembered information from document evidence; and
-14. never imply that a bounded graph-search miss proves no relation exists.
+3. read and obey the separately returned applicable active rules before acting;
+4. use project scope unless global scope is clearly intended;
+5. never pass or invent storage paths for ordinary calls;
+6. decide whether context contains anything worth proposing;
+7. extract atomic proposals instead of storing entire messages;
+8. preserve qualifications, origin, and uncertainty;
+9. avoid placing document knowledge or source excerpts in operational memory;
+10. inspect returned comparison candidates semantically;
+11. never treat embedding similarity as a final duplicate decision;
+12. present exactly three recommended choices for a contradiction;
+13. wait for the user's explicit conflict decision;
+14. cite memory IDs when relying on memory;
+15. call `record_memory_use` only for records actually used;
+16. distinguish remembered information from document evidence; and
+17. never imply that a bounded graph-search miss proves no relation exists.
 
 ## 19. Plain Markdown comparison
 
@@ -824,14 +964,16 @@ The export is a view, not the authoritative database.
 
 ## 20. Resource requirements
 
-Initial operation should require:
+The first local-memory milestone should require only:
 
 - Python and the package's isolated environment;
 - a pinned, verified UltraRAG runtime or dependency;
-- SQLite with FTS support;
-- a pinned CPU-compatible embedding model downloaded once;
-- an in-process vector index such as FAISS; and
+- SQLite with FTS5 support; and
 - the host AI agent for semantic extraction and reconciliation.
+
+The semantic-retrieval milestone additionally requires a pinned CPU-compatible
+embedding model downloaded once and a measured in-process vector index such as
+FAISS.
 
 It should not require:
 
@@ -859,63 +1001,114 @@ separately configured local/API model and is therefore deferred.
 - Never let a global-memory failure fall back to a project database, or vice
   versa.
 
-## 22. Implementation phases
+## 22. Incremental implementation milestones
 
-### Phase 0 — evaluation and contracts
+`TODO.md` is authoritative for task completion. Each milestone below must end
+with a usable, tested vertical slice. Later mechanisms must not be pulled into
+an earlier milestone merely because their schema has already been designed.
 
-- Inspect the pinned UltraRAG memory, retriever, and MCP APIs.
-- Confirm which components can be reused without private imports or patches.
-- Pin the UltraRAG version and attribution.
-- Finalize project registry and global-root locations.
-- Finalize the memory/relation schema and lifecycle state machine.
-- Define measurable CPU and storage targets.
+### Milestone 0 — contracts and measured choices
 
-### Phase 1 — isolated canonical store
+- Inspect the pinned UltraRAG MCP, memory, and retrieval public APIs.
+- Decide exactly what is reused without private imports or upstream patches.
+- Pin dependency and attribution information.
+- Finalize the project registry and OS-specific global-root locations.
+- Specify versioned tool schemas, SQLite migrations, rule precedence, and
+  lifecycle transitions.
+- Confirm SQLite FTS5 availability and define small CPU/storage benchmarks.
 
-- Scaffold the standalone package and stdio entry point.
-- Implement trusted projects-root configuration and name-based initialization.
-- Implement project manifests, registry validation, SQLite migrations, locks,
-  and status.
-- Implement structured create/get/list/correct/retract operations without dense
-  retrieval.
-- Prove two-project physical isolation with adversarial path tests.
+Gate: a reviewed architecture decision records every dependency boundary and
+all first-slice schemas; no speculative dense or graph code exists.
 
-### Phase 2 — semantic admission and hybrid retrieval
+### Milestone 1 — safe project boundary
 
-- Implement the two-phase proposal/reconciliation contract.
-- Add FTS5/BM25 retrieval.
-- Evaluate and pin a CPU embedding model and vector backend.
-- Add immutable or atomic index switching and stale-index reporting.
-- Return explainable component ranks and scope-labelled results.
+- Scaffold the package and stdio server.
+- Implement trusted projects-root configuration, registry lookup, exact
+  name-based initialization, `.memory-rag/project.json`, locks, migrations, and
+  `project_status`.
+- Create an empty project-local SQLite ledger without embeddings or graph data.
 
-### Phase 3 — conflicts, relations, and global memory
+Gate: two projects use physically separate state; traversal, alias ambiguity,
+symlink escape, and typo-created-project tests pass.
 
-- Implement conflict persistence and the three-choice resolution workflow.
-- Implement relation registry, direct edges, revision review, and bounded paths.
-- Implement the physically separate global shard.
-- Add explicit global search/write/promotion and local-over-global scope behavior.
-- Prove that no project store can query another project.
+### Milestone 2 — useful local-memory MVP
 
-### Phase 4 — activation, pruning, export, and UI adapter
+- Implement local rules and operational record types.
+- Add `propose_memory`/`commit_memory`, exact deduplication, revisions,
+  correction, retraction, list/get, and FTS5 recall.
+- Return applicable active rules separately on recall and proposal calls.
+- Guarantee atomic rule replacement and keep an existing rule operative while a
+  change is pending.
+- Add deterministic human-readable Markdown export.
 
-- Implement idempotent confirmed-use recording and rollups.
-- Add class capacities, consolidation support, expiry, dry-run compaction, and
-  garbage collection.
-- Add deterministic Markdown/JSON export.
-- Add an adapter for the shared loopback-only UltraRAG MCP UI if appropriate.
-- Keep the adapter dependent only on public memory MCP tools.
+Gate: an agent can safely add, find, amend, remove, and export project memory;
+exact repetitions do not multiply; no model download is required.
 
-### Phase 5 — optional extensions
+### Milestone 3 — semantic reconciliation and conflicts
 
-- MCP sampling integration where supported.
-- Explicit semantic Markdown migration.
-- Optional GPU embeddings.
-- Alternative vector backends.
-- Explicit user-authorized cross-project consolidation reports.
+- Evaluate and pin a CPU embedding model and in-process vector backend.
+- Add dense candidates and explainable lexical/dense fusion without changing
+  SQLite's authority.
+- Implement semantic dispositions, persisted contradictions, and the exact
+  three-choice user-resolution flow.
+- Add atomic/stale index state and failure recovery.
+
+Gate: paraphrases become candidates without automatic merging, conflicts cannot
+silently activate, and an index failure cannot corrupt canonical memory.
+
+### Milestone 4 — deliberate global memory
+
+- Implement the physically separate global database and indexes.
+- Add explicit global writes, promotion, recall, and project-over-global rule
+  precedence.
+- Keep global records visible as global and prohibit scans across project
+  stores.
+
+Gate: global memory is included only when requested, a project override is
+unambiguous, and no project can query another project's local ledger.
+
+### Milestone 5 — direct relations and bounded paths
+
+- Implement the relation-type registry and reviewed direct edges.
+- Add revision impact checks and bounded directional path search.
+- Enforce all expansion, hop, and result limits without transitive materialized
+  edges.
+
+Gate: returned paths are reproducible, fully explained, correctly directed, and
+report truncation or a bounded miss honestly.
+
+### Milestone 6 — activation and bounded growth
+
+- Implement idempotent confirmed-use recording and bounded rollups.
+- Add class capacities, explicit validity/expiry, consolidation support,
+  dry-run-first compaction, and index garbage collection.
+- Protect active rules, pinned records, and open conflicts from automatic
+  removal.
+
+Gate: repeated retrieval alone cannot reinforce memory, storage stays within
+configured policies, and every destructive proposal has an auditable preview.
+
+### Milestone 7 — portability and optional UI
+
+- Add staged import of the server's Markdown export with reconciliation and
+  conflict review; consider JSON backup only if needed for lossless transfer.
+- Add a loopback-only adapter for the shared UltraRAG MCP UI if it can depend
+  solely on public memory tools.
+
+Gate: an export remains readable by a human, importing never overwrites the
+ledger blindly, and UI use preserves the same authority and isolation rules.
+
+### Optional extensions
+
+- MCP sampling where supported;
+- explicitly reviewed import of arbitrary Markdown prose;
+- GPU embeddings and alternative vector backends; and
+- explicit, user-authorized cross-project consolidation reports.
 
 ## 23. Acceptance tests
 
-The first usable release must demonstrate:
+The completed design must demonstrate, with the milestone-specific subsets in
+`TODO.md` passing before later work begins:
 
 1. The package installs once and starts without an UltraRAG checkout.
 2. An agent initializes an existing project using only its registered name.
@@ -939,6 +1132,17 @@ The first usable release must demonstrate:
     artifacts have been cached.
 19. Exports are readable but do not become a second writable authority.
 20. Memory responses never claim to be source-document quotations or evidence.
+21. Applicable active rules are returned separately from ranked memories.
+22. An active rule remains operative while its proposed replacement is pending,
+    and a resolved replacement switches atomically.
+23. Project rules can explicitly override global rules without rewriting them.
+24. Ordinary admission rejects document excerpts and standalone source
+    knowledge while accepting durable status, progress, style, decisions, and
+    commitments.
+25. Markdown export is deterministic and human-readable; import stages and
+    reconciles records instead of overwriting the canonical ledger.
+26. All project content is contained beneath `.memory-rag/`; no second hidden
+    state tree is created.
 
 ## 24. Decisions still requiring implementation evidence
 
