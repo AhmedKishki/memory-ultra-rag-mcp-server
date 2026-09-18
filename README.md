@@ -196,11 +196,15 @@ The implementation sequence is deliberately small:
 6. Use-based activation, bounded retention, reviewed compaction, import, and an
    optional local UI.
 
-UltraRAG supplies the MCP-oriented architecture and reusable public retrieval
-components where they satisfy the contract. This project supplies the
-operational record model, project/global isolation, rule semantics, lifecycle,
-conflicts, relations, retention, and portability. Upstream UltraRAG source will
-not be modified.
+The lightweight base server will use FastMCP directly while following
+UltraRAG's documented MCP server architecture. Installing base UltraRAG only to
+inherit its server wrapper would add unrelated dependencies and an unwanted
+logging/build surface. At the semantic-retrieval milestone, the first candidate
+is UltraRAG's unmodified retriever server behind MCP; it will be used only if
+isolation, CPU cost, stable-ID mapping, and offline tests pass. This project
+supplies the operational ledger, rule semantics, lifecycle, conflicts,
+relations, retention, and portability. Upstream UltraRAG source will not be
+modified.
 
 See [PLAN.md](PLAN.md) for the complete design, [TODO.md](TODO.md) for the ordered
 implementation gates, and [AGENT_GUIDE.md](AGENT_GUIDE.md) for the future agent

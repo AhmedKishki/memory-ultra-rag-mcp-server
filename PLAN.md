@@ -94,12 +94,20 @@ and the constraints that every milestone must preserve.
 
 ### UltraRAG is used for
 
-- the MCP-oriented architecture and stdio integration pattern;
-- compatible server/tool conventions and agent-facing descriptions;
-- CPU retrieval components and patterns where their public interfaces fit;
-- dense retrieval and FAISS support where appropriate;
+- the MCP-oriented architecture, stdio pattern, and modular server conventions;
+- the first evaluated dense-candidate implementation in Milestone 3, through
+  UltraRAG's unmodified retriever MCP server rather than private Python imports;
 - lexical/dense retrieval orchestration patterns; and
-- optional future pipeline and shared-UI integration.
+- optional future pipeline and shared-UI integration when their public
+  interfaces satisfy this server's contract.
+
+Milestones 1 and 2 use FastMCP directly and do not install UltraRAG merely for
+its `UltraRAG_MCP_Server` wrapper. In a measured CPython 3.12 environment, the
+FastMCP base occupied about 64 MiB across 68 distributions, while base UltraRAG
+occupied about 310 MiB across 117 distributions. The wrapper also creates a
+relative `logs/` directory and registers an irrelevant pipeline `build` tool.
+Those costs provide no memory behavior. The decision and revisit conditions are
+recorded in [ADR 0001](docs/decisions/0001-ultrarag-boundary.md).
 
 ### This project implements
 
@@ -123,8 +131,11 @@ project/global scopes, trust separation, or bounded-retention contract required
 here. Its behavior should be evaluated and credited, but not mistaken for this
 system's record model.
 
-The implementation must pin and verify the supported UltraRAG release. It must
-not patch or write into the managed UltraRAG runtime.
+The semantic milestone must pin and verify the supported UltraRAG snapshot. It
+must not patch it, import repository-internal retriever classes, or write
+project data into the managed runtime. SQLite FTS5 remains the MVP lexical
+engine because it shares the ledger's incremental lifecycle; UltraRAG BM25
+would duplicate that state.
 
 ## 4. Attribution
 

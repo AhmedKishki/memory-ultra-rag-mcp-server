@@ -30,8 +30,9 @@ documentation are complete.
 
 - [x] Inspect the pinned UltraRAG MCP, memory, and retrieval public APIs
       ([audit](docs/audits/ultrarag-api-audit.md)).
-- [ ] Record which UltraRAG components are reused and why each custom component
-      is necessary.
+- [x] Record which UltraRAG components are reused and why each custom component
+      is necessary
+      ([ADR 0001](docs/decisions/0001-ultrarag-boundary.md)).
 - [ ] Pin the supported UltraRAG version/commit and dependency versions.
 - [ ] Add the required license and UltraRAG attribution/NOTICE material.
 - [ ] Choose and document supported Python versions and packaging with `uv`.

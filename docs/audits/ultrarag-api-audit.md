@@ -132,7 +132,5 @@ The first Milestone 0 task is complete. The audit found one plausible direct
 reuse surface—the packaged MCP server class—and ruled out private imports from
 the memory and retriever source trees.
 
-The next checklist task must make and record the actual reuse decision. It must
-weigh the UltraRAG wrapper's logging/build behavior and dependency footprint
-against direct FastMCP use, while preserving an honest and concrete UltraRAG
-integration boundary.
+The resulting reuse decision is recorded in
+[ADR 0001](../decisions/0001-ultrarag-boundary.md).

@@ -68,12 +68,14 @@ integration are tested.
 
 ## Responsibility boundary
 
-Use public, pinned UltraRAG interfaces where they meet the contract:
+The accepted boundary is [ADR 0001](docs/decisions/0001-ultrarag-boundary.md):
 
-- MCP server/stdio patterns;
-- compatible tool and prompt conventions;
-- measured CPU retrieval components; and
-- optional future pipeline or UI integration.
+- use FastMCP directly for Milestones 1 and 2;
+- do not add base UltraRAG merely to subclass `UltraRAG_MCP_Server`;
+- use UltraRAG's documented MCP/stdio architecture and conventions;
+- evaluate the unmodified UltraRAG retriever over MCP first in Milestone 3;
+- never import repository-internal retriever or index-backend modules; and
+- defer pipeline/UI integration until a public interface satisfies the contract.
 
 This repository owns:
 
@@ -87,10 +89,10 @@ This repository owns:
 - activation, retention, compaction, and portability; and
 - public MCP descriptions and agent instructions.
 
-Before adding custom retrieval code, verify whether a stable UltraRAG public
-component meets the requirement. Do not use private imports merely to reduce a
-small amount of local code. Record the decision and pin the supported upstream
-version/commit.
+Before adding custom dense retrieval code, test the UltraRAG retriever MCP
+adapter required by ADR 0001. Reject it only with recorded contract or benchmark
+evidence and amend the ADR. Do not use private imports merely to reduce local
+code. Pin the supported upstream version/commit before implementing the adapter.
 
 ## Storage model
 
