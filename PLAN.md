@@ -985,14 +985,20 @@ The export is a view, not the authoritative database.
 
 The first local-memory milestone should require only:
 
-- Python and the package's isolated environment;
-- a pinned, verified UltraRAG runtime or dependency;
+- CPython 3.11 or 3.12 and one `uv`-managed package environment;
+- the pinned FastMCP-based dependencies used by the base server;
 - SQLite with FTS5 support; and
 - the host AI agent for semantic extraction and reconciliation.
 
-The semantic-retrieval milestone additionally requires a pinned CPU-compatible
-embedding model downloaded once and a measured in-process vector index such as
-FAISS.
+The package uses static PEP 621 metadata, a `src/` layout, setuptools as its
+build backend, and a committed cross-platform `uv.lock`. The precise packaging
+contract is recorded in
+[ADR 0003](docs/decisions/0003-python-and-packaging.md). User projects do not
+need their own virtual environments.
+
+The semantic-retrieval milestone additionally evaluates the pinned UltraRAG
+retriever, requires a pinned CPU-compatible embedding model downloaded once,
+and selects a measured vector backend only if needed.
 
 It should not require:
 

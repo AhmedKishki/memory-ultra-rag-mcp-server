@@ -21,6 +21,11 @@ see [UltraRAG credit](#ultrarag-credit) below.
 > executable yet. Implementation follows [TODO.md](TODO.md) one tested milestone
 > at a time.
 
+The planned package supports CPython 3.11 and 3.12 and uses `uv` for one-time
+installation. Individual projects will not need their own virtual environments.
+The accepted packaging contract is recorded in
+[ADR 0003](docs/decisions/0003-python-and-packaging.md).
+
 ## What it will provide
 
 - One installation serving many isolated projects.

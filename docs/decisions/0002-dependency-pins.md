@@ -94,5 +94,5 @@ Dependency upgrades are deliberate maintenance changes. An upgrade must:
 - Direct dependency drift is prevented before implementation begins.
 - Transitive pins are intentionally deferred to the generated lock rather than
   copied into documentation.
-- Supported Python versions and the build backend remain the next separate
-  packaging decision.
+- Supported Python versions, the build backend, and the `uv` workflow are fixed
+  separately in [ADR 0003](0003-python-and-packaging.md).

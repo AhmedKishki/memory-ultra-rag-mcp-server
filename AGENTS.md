@@ -158,7 +158,10 @@ Once scaffolding begins:
 
 - encode the exact direct dependency versions from
   [ADR 0002](docs/decisions/0002-dependency-pins.md) and commit `uv.lock`;
-- use the Python versions and package manager selected in Milestone 0;
+- implement the CPython 3.11–3.12, PEP 621, `src/`, setuptools, and `uv`
+  contract from [ADR 0003](docs/decisions/0003-python-and-packaging.md);
+- test both supported Python minor versions and use CPython 3.12 as the local
+  development default;
 - use type hints on public and internal function signatures;
 - prefer small cohesive modules and the standard library where practical;
 - use Pydantic only at external/schema boundaries unless evidence supports
