@@ -162,6 +162,8 @@ Once scaffolding begins:
   contract from [ADR 0003](docs/decisions/0003-python-and-packaging.md);
 - test both supported Python minor versions and use CPython 3.12 as the local
   development default;
+- preserve the supported platform matrix and SQLite FTS5 behavior probe from
+  [ADR 0004](docs/decisions/0004-platform-and-fts5.md);
 - use type hints on public and internal function signatures;
 - prefer small cohesive modules and the standard library where practical;
 - use Pydantic only at external/schema boundaries unless evidence supports
