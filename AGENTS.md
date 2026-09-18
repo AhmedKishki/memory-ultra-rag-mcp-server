@@ -156,7 +156,9 @@ project-local log.
 
 Once scaffolding begins:
 
-- use the Python versions and package manager pinned in Milestone 0;
+- encode the exact direct dependency versions from
+  [ADR 0002](docs/decisions/0002-dependency-pins.md) and commit `uv.lock`;
+- use the Python versions and package manager selected in Milestone 0;
 - use type hints on public and internal function signatures;
 - prefer small cohesive modules and the standard library where practical;
 - use Pydantic only at external/schema boundaries unless evidence supports
@@ -167,6 +169,10 @@ Once scaffolding begins:
 - avoid import-time model downloads, database writes, or project selection;
 - lazy-load dense models only in the milestone that needs them; and
 - do not add multiprocessing or a native-language component without profiling.
+
+Do not add embedding, vector, UI, or autonomous-model dependencies before their
+milestone. Direct-pin upgrades require an ADR update and the relevant complete
+test gates; transitive versions belong in `uv.lock`, not duplicated lists.
 
 Use `apply_patch` for manual edits. Do not modify generated databases, indexes,
 exports, locks, logs, or model caches as source files.

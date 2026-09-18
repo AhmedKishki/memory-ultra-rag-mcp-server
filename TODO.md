@@ -33,7 +33,8 @@ documentation are complete.
 - [x] Record which UltraRAG components are reused and why each custom component
       is necessary
       ([ADR 0001](docs/decisions/0001-ultrarag-boundary.md)).
-- [ ] Pin the supported UltraRAG version/commit and dependency versions.
+- [x] Pin the supported UltraRAG version/commit and dependency versions
+      ([ADR 0002](docs/decisions/0002-dependency-pins.md)).
 - [ ] Add the required license and UltraRAG attribution/NOTICE material.
 - [ ] Choose and document supported Python versions and packaging with `uv`.
 - [ ] Confirm SQLite FTS5 on every supported platform.

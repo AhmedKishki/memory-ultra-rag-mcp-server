@@ -217,7 +217,8 @@ and its [documentation](https://ultrarag.openbmb.cn/). Credit belongs to the
 UltraRAG team and contributors, including the participating organizations named
 by the project: THUNLP, NEUIR, OpenBMB, and AI9stars.
 
-The supported upstream version/commit and applicable Apache-2.0 attribution
-will be pinned before code is released. Memory UltraRAG MCP is independently
-maintained and does not imply endorsement by the UltraRAG project or its
-contributors.
+The reviewed upstream snapshot is pinned in
+[ADR 0002](docs/decisions/0002-dependency-pins.md); the applicable Apache-2.0
+license and attribution material will be added before code is released. Memory
+UltraRAG MCP is independently maintained and does not imply endorsement by the
+UltraRAG project or its contributors.

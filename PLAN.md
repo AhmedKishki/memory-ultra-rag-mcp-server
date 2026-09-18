@@ -135,7 +135,10 @@ The semantic milestone must pin and verify the supported UltraRAG snapshot. It
 must not patch it, import repository-internal retriever classes, or write
 project data into the managed runtime. SQLite FTS5 remains the MVP lexical
 engine because it shares the ledger's incremental lifecycle; UltraRAG BM25
-would duplicate that state.
+would duplicate that state. The accepted initial direct dependencies and
+UltraRAG snapshot are fixed in
+[ADR 0002](docs/decisions/0002-dependency-pins.md); embedding and vector
+dependencies remain deliberately unselected until Milestone 3.
 
 ## 4. Attribution
 
