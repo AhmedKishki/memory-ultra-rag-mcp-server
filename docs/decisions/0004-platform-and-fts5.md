@@ -1,6 +1,6 @@
 # ADR 0004: Initial Platform Matrix and SQLite FTS5
 
-Status: proposed pending the first complete CI matrix
+Status: accepted
 
 Date: 2026-09-18
 
@@ -58,6 +58,14 @@ probe. A new target becomes supported only after its complete matrix passes.
 
 ## Evidence
 
-The decision becomes accepted only after both jobs in the first GitHub Actions
-matrix pass. Record the workflow URL, exact interpreter and SQLite versions,
-and local result here before checking the TODO item complete.
+The Linux x86-64 checks passed on 2026-09-18:
+
+- [GitHub Actions run 35351218910](https://github.com/AhmedKishki/memory-ultra-rag-mcp-server/actions/runs/35351218910)
+  passed on Ubuntu 24.04 for CPython 3.11 and 3.12 at commit `380e096`.
+- The local CPython 3.11.15 probe used SQLite 3.53.1.
+- The local CPython 3.12.3 probe used SQLite 3.45.1.
+- Both local runs reported `ENABLE_FTS5` and passed phrase matching, prefix
+  matching, BM25 scoring, removal of replaced terms, and indexing of new terms.
+
+The workflow remains active so later Python or runner-image changes cannot
+silently remove the required behavior.

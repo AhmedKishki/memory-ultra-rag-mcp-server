@@ -26,9 +26,9 @@ installation. Individual projects will not need their own virtual environments.
 The accepted packaging contract is recorded in
 [ADR 0003](docs/decisions/0003-python-and-packaging.md).
 
-The initial platform target is Linux x86-64. Support becomes final only after
-the SQLite FTS5 checks in
-[ADR 0004](docs/decisions/0004-platform-and-fts5.md) pass.
+The initial supported platform is Linux x86-64. SQLite FTS5 is verified on both
+supported Python versions and remains continuously checked as defined in
+[ADR 0004](docs/decisions/0004-platform-and-fts5.md).
 
 ## What it will provide
 

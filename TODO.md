@@ -39,7 +39,8 @@ documentation are complete.
       [attribution/NOTICE](NOTICE) material.
 - [x] Choose and document supported Python versions and packaging with `uv`
       ([ADR 0003](docs/decisions/0003-python-and-packaging.md)).
-- [ ] Confirm SQLite FTS5 on every supported platform.
+- [x] Confirm SQLite FTS5 on the supported Linux x86-64 target
+      ([ADR 0004](docs/decisions/0004-platform-and-fts5.md)).
 - [ ] Define the user registry and OS-specific global-memory data locations.
 - [ ] Define versioned MCP input/output schemas with complete field descriptions
       and correct tool annotations.
