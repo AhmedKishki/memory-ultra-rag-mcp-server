@@ -5,27 +5,36 @@ This project is licensed under the Apache License, Version 2.0. See LICENSE.
 
 ULTRARAG ATTRIBUTION
 
-Memory UltraRAG MCP serves UltraRAG's own memory server, unmodified, from a
-pinned checkout of https://github.com/OpenBMB/UltraRAG.
+Memory UltraRAG MCP serves UltraRAG's memory: one standing MEMORY.md per scope
+plus one dated dialogue file per day, with the tools get_global_memory,
+save_memory, get_local_memory, and save_local_memory.
 
-  Upstream revision: 3a709a2aea3fbe46acca59c422621c94b6e86857
-  Declared version:  0.3.0.2
-  Served file:       servers/memory/src/memory.py
-  Upstream license:  Apache License 2.0
+The behaviour, the tool names and parameters, the file names, and the file
+formats are UltraRAG's, taken from the upstream repository at a pinned revision:
 
-The memory model, the tools `get_global_memory` and `save_memory`, the file
-names, the file formats, and the storage behaviour are UltraRAG's. No UltraRAG
-source file is copied, patched, vendored, or redistributed by this package: the
-upstream server is started from the user's own checkout, in place, as a child
-process, and its tools are proxied unchanged.
+  Upstream repository: https://github.com/OpenBMB/UltraRAG
+  Upstream revision:   3a709a2aea3fbe46acca59c422621c94b6e86857
+  Declared version:    0.3.0.2
+  Reference file:      servers/memory/src/memory.py
+  Upstream license:    Apache License 2.0
 
-The differences this package makes are entry-point differences and are listed in
-README.md: the server is installable and runs over stdio; its storage root is
-passed in rather than derived from the checkout's location; its child process runs
-in, and logs to, a workspace directory; the pinned revision and version are
-validated before anything starts; and the exposed surface is narrowed to the two
-memory tools, because UltraRAG's server base class also registers a pipeline
-`build` tool that has no pipeline to build here.
+No UltraRAG source file is copied, vendored, or redistributed by this package.
+The behaviour and the formats were reimplemented in original Python from that
+reference, and this package's output is checked byte-for-byte against files the
+upstream server at that revision produced, which are committed under
+tests/fixtures/upstream/ with the method used to capture them.
+
+THE DIFFERENCE THIS PACKAGE MAKES
+
+Global memory keeps UltraRAG's own layout inside UltraRAG's UI storage tree:
+<storage-root>/memory/<user_id>/MEMORY.md and .../project/<YYYY-MM-DD>.md.
+
+Local memory is kept inside the project this server is bound to, at
+<project-root>/.memory-rag/, in the same shape and format, so a project's memory
+is private to that project and travels with it. The reference implementation keeps
+every scope under one storage tree; this package moves the project scope into the
+project and binds the project at startup. The remaining choices - the four-tool
+surface, and validating the roots before serving - are listed in README.md.
 
 UltraRAG is developed by its team and contributors, including participants from
 THUNLP, Tsinghua University, NEUIR, Northeastern University, OpenBMB, and

@@ -3,10 +3,8 @@
     "memory-ultra-rag-mcp": {
       "command": "/ABSOLUTE/PATH/TO/memory-ultra-rag-mcp-server/.venv/bin/memory-ultra-rag-mcp",
       "args": [
-        "--ultrarag-root",
-        "/ABSOLUTE/PATH/TO/UltraRAG",
-        "--workspace-root",
-        "/ABSOLUTE/PATH/TO/memory-workspace",
+        "--project-root",
+        "/ABSOLUTE/PATH/TO/my-project",
         "--storage-root",
         "/ABSOLUTE/PATH/TO/UltraRAG/ui/storage"
       ],

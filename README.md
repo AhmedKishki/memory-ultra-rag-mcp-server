@@ -1,27 +1,32 @@
 # Memory UltraRAG MCP
 
-**Purpose:** serve UltraRAG's memory to an agent over stdio MCP, in two kinds —
-**global memory**, one per user, and **local memory**, one per project. Each kind
-is a standing document plus one dated dialogue file per day, written in
-UltraRAG's own format, in UltraRAG's own storage tree, so every client pointed at
-that tree reads and shows the same memory.
+**Purpose:** serve UltraRAG's memory to an agent over stdio MCP, in two kinds:
 
-The memory itself is UltraRAG's. Its own server runs as a child process from a
-pinned checkout and is served through: the two upstream tools are proxied
-unchanged, and the two local-memory tools call those same upstream tools with a
-project's scope, so both kinds have the same shape, the same file names, and the
-same format.
+- **local memory** belongs to the project this server is bound to and lives inside
+  that repository, under `.memory-rag`, so a project carries its memory with it
+  and no other project reads it;
+- **global memory** belongs to a user and lives in UltraRAG's shared storage
+  tree, so every instance serving that tree reads the same memory.
+
+Both kinds work the same way: a standing document plus one dated dialogue file
+per day, written in UltraRAG's format. The agent chooses which kind a write goes
+to, and the two tools of each kind take the same arguments.
+
+The behaviour, the tool names, the file names, and the byte formats are
+UltraRAG's, taken from `servers/memory/src/memory.py` at the pinned revision below
+and checked against files that revision produced. The difference this package
+makes is where a project's memory lives: UltraRAG keeps everything under one
+storage tree, and this server keeps each project's memory inside the project.
+
+| Reference revision | Declared version |
+| --- | --- |
+| `3a709a2aea3fbe46acca59c422621c94b6e86857` | `0.3.0.2` |
 
 ## Requirements
 
-- CPython 3.11 or 3.12, Linux.
-- `uv`.
-- A **UltraRAG Git checkout at the pinned revision**. The server validates the
-  revision and the declared version, and serves an unmodified tree.
-
-| Pinned revision | Declared version | Memory server |
-| --- | --- | --- |
-| `3a709a2aea3fbe46acca59c422621c94b6e86857` | `0.3.0.2` | `servers/memory/src/memory.py` |
+CPython 3.11 or 3.12, Linux, and `uv`. No UltraRAG checkout is needed: the
+formats are verified against captured fixtures, and both roots are ordinary
+directories this server creates as it needs them.
 
 ## Install
 
@@ -31,9 +36,6 @@ cd memory-ultra-rag-mcp-server
 uv sync --frozen
 ```
 
-UltraRAG is installed from that revision's source archive, the way the other
-UltraRAG-based servers in this collection install it.
-
 ## Configure an MCP client
 
 ```json
@@ -42,8 +44,7 @@ UltraRAG-based servers in this collection install it.
     "memory-ultra-rag-mcp": {
       "command": "/ABSOLUTE/PATH/TO/memory-ultra-rag-mcp-server/.venv/bin/memory-ultra-rag-mcp",
       "args": [
-        "--ultrarag-root", "/ABSOLUTE/PATH/TO/UltraRAG",
-        "--workspace-root", "/ABSOLUTE/PATH/TO/memory-workspace",
+        "--project-root", "/ABSOLUTE/PATH/TO/my-project",
         "--storage-root", "/ABSOLUTE/PATH/TO/UltraRAG/ui/storage"
       ]
     }
@@ -53,60 +54,63 @@ UltraRAG-based servers in this collection install it.
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `--ultrarag-root` | The pinned checkout to serve | `$ULTRARAG_ROOT`, else required |
-| `--workspace-root` | Directory holding the child's log | the per-user data directory |
-| `--storage-root` | UltraRAG's **UI storage root**, where memory is read and written | `<workspace-root>/ui-storage` |
-| `--python-executable` | Interpreter for the upstream child server | this interpreter |
-| `--log-level` | Log level handed to the child server | `warn` |
+| `--project-root` | The repository whose local memory is served | required |
+| `--storage-root` | UltraRAG's UI storage tree, holding every user's global memory | `$ULTRARAG_UI_STORAGE_ROOT`, then `<workspace-root>/ui-storage` |
+| `--workspace-root` | Directory for this server's own files | the per-user data directory |
+
+One server instance serves one project, so `--project-root` binds the session:
+local memory always means that project's memory.
 
 ## The four tools
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `get_global_memory` | `user_id="default"` | Returns that user's standing memory, the whole `MEMORY.md`. UltraRAG creates it from its template the first time it is read. |
-| `save_memory` | `user_id`, `q_ls`, `ans_ls` | Appends one round — your message and the reply — with a timestamp, to that user's daily file. |
-| `get_local_memory` | `project_id` | Returns that project's standing memory, in the project's own scope. |
-| `save_local_memory` | `project_id`, `q_ls`, `ans_ls` | Appends one round to that project's daily file, in the project's own scope. |
+| `get_local_memory` | — | Returns the project's standing memory, the whole `MEMORY.md`, and creates it from UltraRAG's template the first time it is read. |
+| `save_local_memory` | `q_ls`, `ans_ls` | Appends one round to the project's daily file. |
+| `get_global_memory` | `user_id="default"` | Returns that user's standing memory, and creates it from UltraRAG's template the first time it is read. |
+| `save_memory` | `user_id`, `q_ls`, `ans_ls` | Appends one round to that user's daily file. |
 
-`project_id` is a name, not a path: letters, digits, `_` and `-`, at most 64
-characters. The prefix `local-` is reserved for local memory, so a project's
-memory and a user's memory never share a directory by accident.
-
-The first two tools are UltraRAG's, with its names, parameters, defaults, and
-return shapes; the two local tools call them with a project's scope.
+`q_ls` and `ans_ls` are single-element lists — the user's message and the reply —
+in the shape UltraRAG's own tool takes. A `user_id` holds letters, digits, `_` and
+`-`, which is both upstream's rule and what keeps a user's memory to one directory.
 
 ## Storage
 
-Everything lives under the storage root, in UltraRAG's layout:
-
 ```
-<storage-root>/memory/<user_id>/MEMORY.md                   a user's standing memory
-<storage-root>/memory/<user_id>/project/<date>.md           that user's rounds, by day
-<storage-root>/memory/local-<project_id>/MEMORY.md          a project's standing memory
-<storage-root>/memory/local-<project_id>/project/<date>.md  that project's rounds, by day
+<project-root>/.memory-rag/MEMORY.md                  the project's standing memory
+<project-root>/.memory-rag/project/<date>.md          the project's rounds, by day
+<storage-root>/memory/<user_id>/MEMORY.md             a user's standing memory
+<storage-root>/memory/<user_id>/project/<date>.md     that user's rounds, by day
 ```
 
-`--storage-root` is UltraRAG's UI storage root (`ULTRARAG_UI_STORAGE_ROOT`).
-Pointing it at an existing `UltraRAG/ui/storage` adopts the memory already there,
-and pointing a UltraRAG UI at the same directory shows the memory this server
-writes: the two read one tree, with no exchange format and no import step.
+A round is written in UltraRAG's format:
+
+```markdown
+# Project Memory 2026-09-22
+
+## 2026-09-22 14:48:30
+- user: Where does the draft live?
+- assistant: In the project directory.
+```
+
+Two consequences worth knowing:
+
+- **A project's memory is ordinary Markdown in that project.** It is visible,
+  diffable, and optionally committed, by the project's own choice.
+- **Global memory sits in UltraRAG's UI storage tree.** Point a UltraRAG UI at the
+  same storage root and it shows the global memory an agent writes, with no
+  exchange format and no import step.
 
 ## The choices this package makes
 
-The memory behaviour is UltraRAG's, running unmodified from the checkout. These
-are the entry-point choices, each visible in the surface or in the storage above:
-
 | # | Choice | Reason |
 | --- | --- | --- |
-| M1 | It installs and runs as its own console command over stdio | so it can be configured as a standalone MCP server |
-| M2 | The storage root is passed in | UltraRAG derives a relative root from where its own checkout lives, which suits a pipeline and not an installed server |
-| M3 | The child runs in, and logs to, `<workspace-root>` | UltraRAG's server base class creates a relative `logs/` directory, and this keeps it inside the server's own workspace |
-| M4 | The surface carries the four memory tools | UltraRAG's server base class also registers a pipeline `build` tool, which belongs to a pipeline deployment; this surface is the memory tools |
-| M5 | The pinned revision and version are validated at startup | so the served memory is a known revision |
-| M6 | Local memory is a project's scope under the reserved `local-` prefix | two kinds of memory in one tree, with UltraRAG's own tools and format for both |
-
-No UltraRAG source file is copied, patched, or vendored: the checkout is read,
-and the child process runs from it in place.
+| 1 | Local memory is kept inside the project, under `.memory-rag` | isolation is the point: a project's memory is private to that project and travels with it |
+| 2 | The project is bound at startup, and the project tools take no project argument | one session means one project, so local memory cannot be written into the wrong one |
+| 3 | Global memory keeps UltraRAG's layout in the storage tree | the shared memory stays where a UltraRAG UI already reads it |
+| 4 | The behaviour, file names, and formats are UltraRAG's, and the two kinds share one implementation | a project's memory and a user's memory have one shape, so either can be read the same way |
+| 5 | The surface is the four memory tools | UltraRAG's server base class also registers a pipeline `build` tool, which belongs to a pipeline deployment; this surface is memory |
+| 6 | The reference revision and its captured output are committed and tested | the format cannot drift quietly: a change fails `tests/test_fidelity.py` |
 
 ## Develop and test
 
@@ -114,26 +118,21 @@ and the child process runs from it in place.
 uv sync --frozen
 uv run --frozen ruff format --check .
 uv run --frozen ruff check .
-uv run --frozen pytest          # unit suite; the integration suite skips itself
+uv run --frozen pytest
 uv build
 ```
 
-The integration suite starts the real upstream memory server, so it takes a
-checkout at the pinned revision:
-
-```bash
-ULTRARAG_ROOT=/path/to/UltraRAG uv run --frozen pytest -q -m integration
-```
-
-It calls both kinds of memory through the real server and checks the surface, the
-storage layout, the file format of a round, the separation of two projects and of
-a project from a user, UltraRAG's own validation of identifiers, and that serving
-memory leaves the checkout untouched.
+The suite runs without any UltraRAG checkout. It covers one scope's behaviour
+(template, create-on-read, round format, append, day rollover, refusals), the
+four tools over the real stdio server, project isolation between two projects, the
+shared global tree, and a byte-for-byte comparison against the files UltraRAG's
+own server produced (`tests/fixtures/upstream/README.md` records how they were
+captured).
 
 ## Credit and licensing
 
-The memory model, the tools `get_global_memory` and `save_memory`, the file
-names, and the file formats are UltraRAG's, from
+The memory model, the tools `get_global_memory` and `save_memory`, the file names,
+and the file formats are UltraRAG's, from
 [`OpenBMB/UltraRAG`](https://github.com/OpenBMB/UltraRAG) at commit `3a709a2`
 (Apache-2.0). Credit belongs to the UltraRAG team and contributors, including
 participants from THUNLP, NEUIR, OpenBMB, and AI9stars.
