@@ -1,8 +1,6 @@
 """Instructions sent to any client that connects to this server.
 
-They are written to match what the server actually does: the memory is
-UltraRAG's own, the tools are upstream's, and nothing here searches, ranks,
-summarizes, or corrects memory.
+They describe the two kinds of memory this server serves and how to use them.
 """
 
 from __future__ import annotations
@@ -10,31 +8,33 @@ from __future__ import annotations
 __all__ = ["SERVER_INSTRUCTIONS"]
 
 SERVER_INSTRUCTIONS = """\
-This server exposes UltraRAG's own memory: one global MEMORY.md per user and one
-dated dialogue file per day, unmodified from the pinned UltraRAG checkout it was
-started from.
+This server serves UltraRAG's memory in two kinds. Each kind is a standing
+document plus one dated dialogue file per day, written in UltraRAG's own format,
+and both kinds live in the same storage tree.
 
-Two tools are available.
+Global memory — one per user, holding who the user is and what they want
+remembered everywhere:
 
-- get_global_memory(user_id) returns the whole global MEMORY.md for that user.
-  It is the user's standing profile: identity, preferences, and anything else
-  they asked to be remembered globally. Note that upstream creates the file with
-  a template on first read, so the first call for a new user also creates it.
-- save_memory(user_id, q_ls, ans_ls) appends one user/assistant round, with a
-  timestamp, to that day's project file. It appends; it never edits or removes.
+- get_global_memory(user_id) returns that user's standing memory.
+- save_memory(user_id, q_ls, ans_ls) appends one round to that user's daily file.
 
-How to behave:
+Local memory — one per project, holding what belongs to that project:
 
-1. Read the global memory before answering anything that depends on the user's
-   standing preferences, and treat what it says as the user's own words.
-2. Save a round when the user asks you to remember the exchange, and pass their
-   question and your answer as they were, not as a summary.
-3. Treat memory as a record, never as evidence: it is not a source, and it is
-   never safe to quote as one.
-4. The stored text can be stale or wrong, and nothing here reconciles it. If a
-   statement contradicts the user, say so and let them decide; this server has
-   no way to correct, retract, or deduplicate what was written.
-5. user_id is a scope, not a secret. Use the identifier the user or the host
-   application gave you, and do not invent one to separate two conversations
-   unless the user asked for that.
+- get_local_memory(project_id) returns that project's standing memory.
+- save_local_memory(project_id, q_ls, ans_ls) appends one round to that project's
+  daily file.
+
+How to use them:
+
+1. Read the user's global memory at the start of a conversation, and read the
+   project's local memory when you are working inside a project.
+2. Write to global memory what applies wherever the user works, and to local
+   memory what belongs to the project at hand.
+3. Save a round when the user asks you to remember the exchange, and pass their
+   message and your reply as they were said.
+4. Use the identifier the user or the host application gave you for the user or
+   the project, and say which kind of memory you wrote to.
+5. Treat what memory returns as the record of what was said, quote it as the
+   user's own words, and let the user decide which write matters when two writes
+   disagree.
 """

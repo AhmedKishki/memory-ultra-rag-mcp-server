@@ -13,7 +13,7 @@ from mcp.types import Tool as MCPTool
 
 from memory_ultra_rag_mcp import server
 from memory_ultra_rag_mcp.config import ServerConfig
-from memory_ultra_rag_mcp.manifest import MEMORY_TOOLS, STORAGE_ENV_VAR
+from memory_ultra_rag_mcp.manifest import STORAGE_ENV_VAR
 
 
 def _config(tmp_path: Path) -> ServerConfig:
@@ -51,10 +51,12 @@ def test_the_surface_is_narrowed_to_the_memory_tools() -> None:
             MCPTool(name="build", inputSchema={"type": "object"}),
             MCPTool(name="get_global_memory", inputSchema={"type": "object"}),
             MCPTool(name="save_memory", inputSchema={"type": "object"}),
+            MCPTool(name="get_local_memory", inputSchema={"type": "object"}),
+            MCPTool(name="save_local_memory", inputSchema={"type": "object"}),
         ]
 
     listed = asyncio.run(middleware.on_list_tools(context, call_next))
-    assert [tool.name for tool in listed] == list(MEMORY_TOOLS)
+    assert [tool.name for tool in listed] == list(server.SERVED_TOOLS)
 
     calls: MiddlewareContext[CallToolRequestParams] = MiddlewareContext(
         message=CallToolRequestParams(name="build", arguments={})
@@ -63,10 +65,14 @@ def test_the_surface_is_narrowed_to_the_memory_tools() -> None:
         asyncio.run(middleware.on_call_tool(calls, call_next))
 
 
-def test_the_surface_allows_the_memory_tools_through() -> None:
+@pytest.mark.parametrize(
+    "name",
+    ["get_global_memory", "save_memory", "get_local_memory", "save_local_memory"],
+)
+def test_the_surface_allows_every_served_tool_through(name: str) -> None:
     middleware = server.MemorySurfaceOnly()
     context: MiddlewareContext[CallToolRequestParams] = MiddlewareContext(
-        message=CallToolRequestParams(name="get_global_memory", arguments={})
+        message=CallToolRequestParams(name=name, arguments={})
     )
 
     async def call_next(_: MiddlewareContext[CallToolRequestParams]) -> str:

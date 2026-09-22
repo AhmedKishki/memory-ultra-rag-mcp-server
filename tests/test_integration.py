@@ -62,12 +62,108 @@ def transport(tmp_path: Path) -> StdioTransport:
     )
 
 
-def test_the_served_surface_is_the_two_memory_tools(transport: StdioTransport) -> None:
+def test_the_served_surface_is_the_two_kinds_of_memory(
+    transport: StdioTransport,
+) -> None:
     async def scenario() -> list[str]:
         async with Client(transport) as client:
             return sorted(tool.name for tool in await client.list_tools())
 
-    assert asyncio.run(scenario()) == sorted(MEMORY_TOOLS)
+    assert asyncio.run(scenario()) == sorted(
+        [*MEMORY_TOOLS, "get_local_memory", "save_local_memory"]
+    )
+
+
+def test_local_memory_is_written_under_the_projects_own_scope(
+    transport: StdioTransport, tmp_path: Path
+) -> None:
+    """Two projects keep two memories, in UltraRAG's own layout and format."""
+    question = "Where does the draft live?"
+    answer = "In the project directory."
+
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+        async with Client(transport) as client:
+            first = _data(
+                await client.call_tool(
+                    "save_local_memory",
+                    {
+                        "project_id": "thesis",
+                        "q_ls": [question],
+                        "ans_ls": [answer],
+                    },
+                )
+            )
+            second = _data(
+                await client.call_tool(
+                    "save_local_memory",
+                    {"project_id": "notes", "q_ls": ["Other?"], "ans_ls": ["Yes."]},
+                )
+            )
+            return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first == {"project_id": "thesis", "scope": "local-thesis", "status": "saved"}
+    assert second["scope"] == "local-notes"
+
+    memory = tmp_path / "workspace" / "ui-storage" / "memory"
+    thesis_rounds = sorted((memory / "local-thesis" / "project").glob("*.md"))
+    notes_rounds = sorted((memory / "local-notes" / "project").glob("*.md"))
+    assert len(thesis_rounds) == 1 and len(notes_rounds) == 1
+
+    text = thesis_rounds[0].read_text(encoding="utf-8")
+    assert text.startswith(f"# Project Memory {thesis_rounds[0].stem}\n")
+    assert ENTRY_RE.search(text)
+    assert f"- user: {question}" in text
+    assert f"- assistant: {answer}" in text
+    # The other project's round is in its own file, not this one.
+    assert "Other?" not in text
+
+
+def test_local_memory_and_global_memory_stay_apart(
+    transport: StdioTransport, tmp_path: Path
+) -> None:
+    """A project's memory and a user's memory are two files in one tree."""
+
+    async def scenario() -> tuple[dict[str, Any], str]:
+        async with Client(transport) as client:
+            local = _data(
+                await client.call_tool("get_local_memory", {"project_id": "thesis"})
+            )
+            global_read = _data(
+                await client.call_tool("get_global_memory", {"user_id": "ahmed"})
+            )
+            return local, global_read["global_memory_content"]
+
+    local, global_content = asyncio.run(scenario())
+    assert local["scope"] == "local-thesis"
+    assert "MEMORY" in local["local_memory_content"]
+    assert "MEMORY" in global_content
+
+    memory = tmp_path / "workspace" / "ui-storage" / "memory"
+    assert (memory / "local-thesis" / "MEMORY.md").is_file()
+    assert (memory / "ahmed" / "MEMORY.md").is_file()
+    # The two words differ: local memory is not a user's global memory.
+    assert (memory / "local-thesis" / "MEMORY.md").read_text(encoding="utf-8") == local[
+        "local_memory_content"
+    ]
+
+
+@pytest.mark.parametrize("project_id", ["../escape", "a/b", "with space"])
+def test_an_unusable_project_identifier_is_refused(
+    transport: StdioTransport, project_id: str
+) -> None:
+    async def scenario() -> tuple[bool, str]:
+        async with Client(transport) as client:
+            result = await client.call_tool(
+                "get_local_memory", {"project_id": project_id}, raise_on_error=False
+            )
+            return result.is_error, "\n".join(
+                getattr(block, "text", "") for block in result.content
+            )
+
+    is_error, message = asyncio.run(scenario())
+    assert is_error is True
+    assert "project_id" in message
 
 
 def test_memory_is_written_where_the_ui_reads_it(
