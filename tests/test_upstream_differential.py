@@ -63,12 +63,17 @@ def _data(result: Any) -> Any:
     return json.loads(result.content[0].text)
 
 
-def _upstream_transport(storage: Path) -> StdioTransport:
+def _upstream_transport(storage: Path, workspace: Path) -> StdioTransport:
     assert CHECKOUT is not None
     server, interpreter = CHECKOUT
     return StdioTransport(
         command=str(interpreter),
         args=[str(server)],
+        # The checkout's own logger writes relative to the working directory, so the
+        # child runs in a scratch directory and its stderr goes to a file there: a
+        # comparison must leave the repository exactly as it found it.
+        cwd=str(workspace),
+        log_file=workspace / "upstream-stderr.log",
         env={
             **os.environ,
             "PYTHONPATH": str(server.parents[3] / "src"),
@@ -77,7 +82,7 @@ def _upstream_transport(storage: Path) -> StdioTransport:
     )
 
 
-def _our_transport(project: Path, storage: Path) -> StdioTransport:
+def _our_transport(project: Path, storage: Path, workspace: Path) -> StdioTransport:
     return StdioTransport(
         command=sys.executable,
         args=[
@@ -88,6 +93,8 @@ def _our_transport(project: Path, storage: Path) -> StdioTransport:
             "--storage-root",
             str(storage),
         ],
+        cwd=str(workspace),
+        log_file=workspace / "our-stderr.log",
     )
 
 
@@ -117,15 +124,19 @@ def _written(storage: Path) -> tuple[bytes, dict[str, bytes]]:
 @requires_upstream
 def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     upstream_storage = tmp_path / "upstream-storage"
+    upstream_workspace = tmp_path / "upstream-workspace"
+    upstream_workspace.mkdir()
     our_project = tmp_path / "thesis"
     our_project.mkdir()
     our_storage = tmp_path / "our-storage"
+    our_workspace = tmp_path / "our-workspace"
+    our_workspace.mkdir()
 
     upstream_tools, upstream_read, _ = asyncio.run(
-        _exercise(_upstream_transport(upstream_storage))
+        _exercise(_upstream_transport(upstream_storage, upstream_workspace))
     )
     our_tools, our_read, _ = asyncio.run(
-        _exercise(_our_transport(our_project, our_storage))
+        _exercise(_our_transport(our_project, our_storage, our_workspace))
     )
 
     # The store itself: same standing document, same round, same file names.
