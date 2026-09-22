@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -79,12 +80,46 @@ def _global_directory(config: ServerConfig, user_id: str) -> Path:
     return config.global_root / normalized
 
 
-def create_server(config: ServerConfig) -> FastMCP[Any]:
-    """Create the server that serves one project's memory and the global tree."""
+def create_server(
+    config: ServerConfig,
+    *,
+    ui_port: int | None = None,
+) -> FastMCP[Any]:
+    """Create the server that serves one project's memory and the global tree.
+
+    With ``ui_port`` the same process also serves the browser view of exactly the
+    memory these tools serve; without it nothing of the browser stack is loaded.
+    """
+    holder: dict[str, Any] = {}
+
+    @asynccontextmanager
+    async def lifespan(_: FastMCP[Any]) -> AsyncIterator[dict[str, Any]]:
+        if ui_port is None:
+            yield {}
+            return
+        # Imported lazily so a server that serves no view never loads uvicorn and
+        # starlette, and so this module does not import the view that imports it.
+        from .ui import UIPort
+
+        view = UIPort(config, port=ui_port)
+        await view.start()
+        holder["view"] = view
+        if view.error is not None:
+            print(f"{SERVER_NAME}: {view.error}", file=sys.stderr)
+        else:
+            print(f"{SERVER_NAME}: browser view at {view.url}", file=sys.stderr)
+        try:
+            yield {}
+        finally:
+            active = holder.pop("view", None)
+            if active is not None:
+                await active.stop()
+
     server = FastMCP(
         name=SERVER_NAME,
         version=__version__,
         instructions=SERVER_INSTRUCTIONS,
+        lifespan=lifespan,
     )
 
     @server.tool(name="get_global_memory", annotations=READ_ONLY_ANNOTATIONS)
@@ -194,6 +229,15 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory for this server's own files (default: the user data dir).",
     )
+    parser.add_argument(
+        "--ui-port",
+        type=int,
+        default=None,
+        help=(
+            "Also serve a local browser view of this memory on this loopback port; "
+            "the view is reported on stderr and stops with this server."
+        ),
+    )
     return parser
 
 
@@ -216,7 +260,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigurationError as error:
         print(f"{SERVER_NAME}: {error}", file=sys.stderr)
         return 2
-    create_server(config).run(transport="stdio", show_banner=False)
+    if arguments.ui_port is not None and not 1 <= arguments.ui_port <= 65535:
+        print(f"{SERVER_NAME}: --ui-port must be between 1 and 65535", file=sys.stderr)
+        return 2
+    create_server(config, ui_port=arguments.ui_port).run(
+        transport="stdio", show_banner=False
+    )
     return 0
 
 

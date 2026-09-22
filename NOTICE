@@ -34,7 +34,20 @@ Local memory is kept inside the project this server is bound to, at
 is private to that project and travels with it. The reference implementation keeps
 every scope under one storage tree; this package moves the project scope into the
 project and binds the project at startup. The remaining choices - the four-tool
-surface, and validating the roots before serving - are listed in README.md.
+surface, validating the roots before serving, and the browser view - are listed in
+README.md and summarised below.
+
+THE BROWSER VIEW
+
+The optional browser view is built on ui-ultra-rag-mcp, an independent companion
+project that provides reusable local UI infrastructure for UltraRAG-derived MCP
+servers. It is not part of UltraRAG and carries no UltraRAG code; this package
+pins it by commit and supplies a thin adapter that calls this server's own tools.
+
+Memory is written from the page only through those tools, except for one write
+that has no tool: replacing a whole standing document. That write is atomic and is
+refused when the document changed since it was read, so it cannot silently drop a
+write made by an agent. It is listed in README.md's choice table.
 
 UltraRAG is developed by its team and contributors, including participants from
 THUNLP, Tsinghua University, NEUIR, Northeastern University, OpenBMB, and

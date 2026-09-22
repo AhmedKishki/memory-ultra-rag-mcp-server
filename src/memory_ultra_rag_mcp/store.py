@@ -19,7 +19,10 @@ Upstream's own constants, kept verbatim:
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -28,10 +31,15 @@ __all__ = [
     "TEMPLATE",
     "StoreError",
     "append_round",
+    "count_rounds",
     "daily_rounds",
+    "latest_round_date",
+    "list_rounds",
     "read_standing",
+    "standing_digest",
     "standing_document",
     "user_id_error",
+    "write_standing",
 ]
 
 #: What upstream writes into a standing document it has to create.
@@ -41,6 +49,12 @@ STANDING_FILENAME = "MEMORY.md"
 ROUNDS_DIRNAME = "project"
 
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+#: The round heading upstream writes, which is also how a round is recognized.
+ROUND_HEADING_PATTERN = re.compile(r"^## (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$")
+
+USER_LINE_PREFIX = "- user: "
+ASSISTANT_LINE_PREFIX = "- assistant: "
 
 EMPTY_MESSAGE_ERRORS = (
     "user_message cannot be empty.",
@@ -128,3 +142,147 @@ def append_round(
         with daily_file.open("a", encoding="utf-8") as handle:
             handle.write(entry)
     return daily_file
+
+
+def standing_digest(scope_directory: Path) -> str | None:
+    """Return the digest of one scope's standing document, or None if absent."""
+    document = standing_document(scope_directory)
+    if not document.is_file():
+        return None
+    return hashlib.sha256(document.read_bytes()).hexdigest()
+
+
+def count_rounds(scope_directory: Path) -> int:
+    """Count one scope's rounds without reading their text."""
+    rounds = daily_rounds(scope_directory)
+    if not rounds.is_dir():
+        return 0
+    total = 0
+    for path in sorted(rounds.glob("*.md")):
+        with path.open(encoding="utf-8") as handle:
+            total += sum(1 for line in handle if line.startswith("## "))
+    return total
+
+
+def latest_round_date(scope_directory: Path) -> str | None:
+    """Return the newest date one scope has a round for, or None."""
+    rounds = daily_rounds(scope_directory)
+    if not rounds.is_dir():
+        return None
+    dates = sorted(path.stem for path in rounds.glob("*.md"))
+    return dates[-1] if dates else None
+
+
+def list_rounds(
+    scope_directory: Path,
+    limit: int = 20,
+) -> tuple[list[dict[str, str]], bool]:
+    """Return a scope's newest rounds first, and whether older ones were left out.
+
+    Only rounds written in the format ``append_round`` writes are recognized: a
+    ``## <date> <time>`` heading followed by the user's line and the assistant's
+    line. Text under a heading that carries neither is kept with the round, so a
+    message that wrapped onto a second line survives the round trip.
+    """
+    rounds = daily_rounds(scope_directory)
+    if not rounds.is_dir():
+        return [], False
+
+    selected: list[dict[str, str]] = []
+    truncated = False
+    for path in sorted(rounds.glob("*.md"), key=lambda item: item.stem, reverse=True):
+        parsed = _parse_rounds(path.read_text(encoding="utf-8"), path.name)
+        for entry in reversed(parsed):
+            if len(selected) >= limit:
+                truncated = True
+                break
+            selected.append(entry)
+        if truncated:
+            break
+    return selected, truncated
+
+
+def _parse_rounds(text: str, source_file: str) -> list[dict[str, str]]:
+    """Return the rounds one daily file holds, oldest first."""
+    parsed: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    field: str | None = None
+
+    for line in text.splitlines():
+        heading = ROUND_HEADING_PATTERN.match(line)
+        if heading:
+            current = {
+                "date": heading.group(1),
+                "time": heading.group(2),
+                "user": "",
+                "assistant": "",
+                "source_file": source_file,
+            }
+            parsed.append(current)
+            field = None
+            continue
+        if current is None:
+            continue
+        for name, prefix in (
+            ("user", USER_LINE_PREFIX),
+            ("assistant", ASSISTANT_LINE_PREFIX),
+        ):
+            if line.startswith(prefix):
+                current[name] = line[len(prefix) :]
+                field = name
+                break
+        else:
+            if field is not None and line.strip():
+                current[field] = f"{current[field]}\n{line}"
+    return parsed
+
+
+def write_standing(
+    scope_directory: Path,
+    content: str,
+    *,
+    expected_sha256: str | None = None,
+) -> str:
+    """Replace one scope's standing document, returning its new digest.
+
+    This write is this package's own: upstream only creates the document from its
+    template, and the agent tools never replace it. The file is replaced
+    atomically, and when ``expected_sha256`` is given it must match the bytes on
+    disk, so a document that changed since it was read is never overwritten.
+    """
+    if not content.strip():
+        raise StoreError("standing memory must not be empty")
+
+    scope_directory.mkdir(parents=True, exist_ok=True)
+    document = standing_document(scope_directory)
+    current = standing_digest(scope_directory)
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if current == digest:
+        return digest
+    if expected_sha256 is not None:
+        if current is None:
+            raise StoreError(
+                "the standing document no longer exists; read it again before saving"
+            )
+        if current != expected_sha256:
+            raise StoreError(
+                "the standing document changed since it was read; read it again "
+                "before saving"
+            )
+
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=scope_directory,
+        prefix=".MEMORY-",
+        suffix=".md",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(content)
+    try:
+        os.replace(temporary, document)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return digest

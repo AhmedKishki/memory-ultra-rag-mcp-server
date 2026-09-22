@@ -26,7 +26,9 @@ storage tree, and this server keeps each project's memory inside the project.
 
 CPython 3.11 or 3.12, Linux, and `uv`. No UltraRAG checkout is needed: the
 formats are verified against captured fixtures, and both roots are ordinary
-directories this server creates as it needs them.
+directories this server creates as it needs them. The browser view is the shared
+[`ui-ultra-rag-mcp`](https://github.com/AhmedKishki/ui-ultra-rag-mcp) package,
+pinned by commit and installed with this one.
 
 ## Install
 
@@ -57,6 +59,7 @@ uv sync --frozen
 | `--project-root` | The repository whose local memory is served | required |
 | `--storage-root` | UltraRAG's UI storage tree, holding every user's global memory | `$ULTRARAG_UI_STORAGE_ROOT`, then `<workspace-root>/ui-storage` |
 | `--workspace-root` | Directory for this server's own files | the per-user data directory |
+| `--ui-port` | Also serve a browser view of this memory on this loopback port | off |
 
 One server instance serves one project, so `--project-root` binds the session:
 local memory always means that project's memory.
@@ -73,6 +76,38 @@ local memory always means that project's memory.
 `q_ls` and `ans_ls` are single-element lists — the user's message and the reply —
 in the shape UltraRAG's own tool takes. A `user_id` holds letters, digits, `_` and
 `-`, which is both upstream's rule and what keeps a user's memory to one directory.
+
+## Browser view
+
+Memory is worth looking at, so the same memory the tools serve can be read — and,
+if you want, added to — in a browser on this machine. Two commands do it:
+
+```bash
+# a view of its own, until you stop it
+memory-ultra-rag-ui --project-root /ABSOLUTE/PATH/TO/my-project \
+  --storage-root /ABSOLUTE/PATH/TO/UltraRAG/ui/storage
+
+# or inside the MCP server, reported on stderr and stopped with it
+memory-ultra-rag-mcp --project-root /ABSOLUTE/PATH/TO/my-project --ui-port 5052
+```
+
+`memory-ultra-rag-ui` takes the same three roots, plus `--host` (loopback only)
+and `--port` (default 5052). The view shows:
+
+- a **scope selector**, listing this project's own memory and every user's global
+  memory the storage tree already holds;
+- the **standing memory**, the whole `MEMORY.md`, with a copy button;
+- the **recorded rounds**, newest first, with a filter and a copy button per round;
+- **Add a round**, which writes the user's line and the assistant's line through
+  the same tool an agent calls, so the file is written in one format by one
+  implementation;
+- **Edit standing memory**, which replaces the whole document only when it still
+  matches the version the page read, so a write an agent made meanwhile is never
+  overwritten.
+
+The page is the shared `ui-ultra-rag-mcp` package, pinned by commit, and this
+package supplies a thin adapter: the browser calls this server, the server reads
+and writes its own memory, and the view is handed no directory of its own.
 
 ## Storage
 
@@ -111,6 +146,9 @@ Two consequences worth knowing:
 | 4 | The behaviour, file names, and formats are UltraRAG's, and the two kinds share one implementation | a project's memory and a user's memory have one shape, so either can be read the same way |
 | 5 | The surface is the four memory tools | UltraRAG's server base class also registers a pipeline `build` tool, which belongs to a pipeline deployment; this surface is memory |
 | 6 | The reference revision and its captured output are committed and tested | the format cannot drift quietly: a change fails `tests/test_fidelity.py` |
+| 7 | The browser view is the shared `ui-ultra-rag-mcp` package through a thin adapter, pinned by commit | interface code stays in one repository, and this package keeps no second UI |
+| 8 | The page reaches memory only through this server: no directory is handed to the browser | one reader and one writer per file, and the page shows what an agent reads |
+| 9 | Replacing the standing document is this package's own write, guarded by the digest the page read | upstream only creates that document from its template, and a plain overwrite could drop an agent's write |
 
 ## Develop and test
 
@@ -125,9 +163,10 @@ uv build
 The suite runs without any UltraRAG checkout. It covers one scope's behaviour
 (template, create-on-read, round format, append, day rollover, refusals), the
 four tools over the real stdio server, project isolation between two projects, the
-shared global tree, and a byte-for-byte comparison against the files UltraRAG's
-own server produced (`tests/fixtures/upstream/README.md` records how they were
-captured).
+shared global tree, a byte-for-byte comparison against the files UltraRAG's own
+server produced (`tests/fixtures/upstream/README.md` records how they were
+captured), and the browser view: its scopes, its reads, its two writes, the scope
+a request may name, and the routes a page can call.
 
 ## Credit and licensing
 

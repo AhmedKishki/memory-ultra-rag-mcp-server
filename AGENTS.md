@@ -40,7 +40,19 @@ before it belongs in the code.
 - **The surface is the four memory tools.** UltraRAG's server base class registers
   a pipeline `build` tool as well; it belongs to a pipeline deployment and is not
   part of this surface. Add no other tool: a tool here that is not memory would be
-  a feature this project does not own.
+  a feature this project does not own. The browser view adds no tool.
+- **The view reaches memory only through this server.** `ui.py` is a thin adapter:
+  it authorizes the scope a request names, then reads or writes through `store.py`
+  and the memory tools. The shared UI package is given results, never a path, and
+  it must stay unable to read `.memory-rag` or the storage tree.
+- **The UI package is pinned by commit** in `pyproject.toml`, and it is interface
+  infrastructure with its own release history. Change the pin deliberately, run
+  both suites, and record why in the commit message.
+- **Rounds are written by the tools' own code path.** The view's round form calls
+  `save_local_memory` or `save_memory`, so the browser and an agent produce the
+  same bytes. The one write the view performs itself is replacing the standing
+  document, which has no tool, is written atomically, and is refused when the
+  document changed since it was read.
 - **Never depend on a sibling repository**, and never read another server's
   private state. Cross-server comparison belongs in the collection README, one
   level up.
@@ -58,7 +70,8 @@ uv build
 ```
 
 The suite needs no UltraRAG checkout, and the integration tests start the real
-stdio server twice: once per project, over one shared storage tree.
+stdio server twice: once per project, over one shared storage tree. The browser
+view's own suite drives the adapter in memory and the routes over a test client.
 
 ## Attribution
 
