@@ -22,7 +22,6 @@ def _config(tmp_path: Path) -> ServerConfig:
     return resolve_config(
         project_root=project,
         storage_root=tmp_path / "shared",
-        workspace_root=tmp_path / "ws",
     )
 
 

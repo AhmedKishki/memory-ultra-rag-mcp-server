@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import os
 import socket
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -38,7 +39,15 @@ from ui_ultra_rag_mcp import (
 from ui_ultra_rag_mcp import create_ui_app as create_shared_ui_app
 
 from . import __version__
-from .config import APP_NAME, ConfigurationError, ServerConfig, resolve_config
+from .config import (
+    APP_NAME,
+    PROJECT_ROOT_ENV_VAR,
+    STORAGE_ENV_VAR,
+    ULTRARAG_STORAGE_ENV_VAR,
+    ConfigurationError,
+    ServerConfig,
+    resolve_config,
+)
 from .server import create_server
 from .store import (
     StoreError,
@@ -106,7 +115,8 @@ MEMORY_UI_PROFILE = UIProfile(
     memory_rounds_label="Recorded rounds",
     memory_note=(
         "The bound project's memory is kept inside that project at .memory-rag; "
-        "global memory is kept in the UltraRAG UI storage tree. This page and the "
+        "global memory is kept wherever this server's storage root points, which "
+        "is this account's home data directory by default. This page and the "
         "agent's memory tools write the same files."
     ),
     capabilities=UICapabilities(
@@ -499,24 +509,20 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--project-root",
-        default=None,
+        default=os.environ.get(PROJECT_ROOT_ENV_VAR),
         help=(
             "Repository whose memory is shown. Its own memory is read from "
-            "<project-root>/.memory-rag. Required."
+            f"<project-root>/.memory-rag. Required, or {PROJECT_ROOT_ENV_VAR}."
         ),
     )
     parser.add_argument(
         "--storage-root",
         default=None,
         help=(
-            "UltraRAG UI storage tree holding every user's global memory. Defaults "
-            "to $ULTRARAG_UI_STORAGE_ROOT, then <workspace-root>/ui-storage."
+            "Where every user's global memory lives, as a normal directory. "
+            f"Defaults to ${STORAGE_ENV_VAR}, then ${ULTRARAG_STORAGE_ENV_VAR}, "
+            "then this account's home data directory."
         ),
-    )
-    parser.add_argument(
-        "--workspace-root",
-        default=None,
-        help="Directory for this server's own files (default: the user data dir).",
     )
     parser.add_argument(
         "--host",
@@ -545,7 +551,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = resolve_config(
             project_root=arguments.project_root,
             storage_root=arguments.storage_root,
-            workspace_root=arguments.workspace_root,
         )
     except ConfigurationError as error:
         print(f"{UI_NAME}: {error}", file=sys.stderr)

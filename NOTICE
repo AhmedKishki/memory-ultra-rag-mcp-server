@@ -1,16 +1,12 @@
-Memory UltraRAG MCP
-Copyright 2026 Ahmed Kishki
+Memory UltraRAG MCP Copyright 2026 Ahmed Kishki
 
 This project is licensed under the Apache License, Version 2.0. See LICENSE.
 
 ULTRARAG ATTRIBUTION
 
-Memory UltraRAG MCP serves UltraRAG's memory: one standing MEMORY.md per scope
-plus one dated dialogue file per day, with the tools get_global_memory,
-save_memory, get_local_memory, and save_local_memory.
+Memory UltraRAG MCP serves UltraRAG's memory: one standing MEMORY.md per scope plus one dated dialogue file per day, with the tools get_global_memory, save_memory, get_local_memory, and save_local_memory.
 
-The behaviour, the tool names and parameters, the file names, and the file
-formats are UltraRAG's, taken from the upstream repository at a pinned revision:
+The behaviour, the tool names and parameters, the file names, and the file formats are UltraRAG's, taken from the upstream repository at a pinned revision:
 
   Upstream repository: https://github.com/OpenBMB/UltraRAG
   Upstream revision:   3a709a2aea3fbe46acca59c422621c94b6e86857
@@ -18,42 +14,20 @@ formats are UltraRAG's, taken from the upstream repository at a pinned revision:
   Reference file:      servers/memory/src/memory.py
   Upstream license:    Apache License 2.0
 
-No UltraRAG source file is copied, vendored, or redistributed by this package.
-The behaviour and the formats were reimplemented in original Python from that
-reference, and this package's output is checked byte-for-byte against files the
-upstream server at that revision produced, which are committed under
-tests/fixtures/upstream/ with the method used to capture them.
+No UltraRAG source file is copied, vendored, or redistributed by this package. The behaviour and the formats were reimplemented in original Python from that reference, and this package's output is checked byte-for-byte against files the upstream server at that revision produced, which are committed under tests/fixtures/upstream/ with the method used to capture them.
 
 THE DIFFERENCE THIS PACKAGE MAKES
 
-Global memory keeps UltraRAG's own layout inside UltraRAG's UI storage tree:
-<storage-root>/memory/<user_id>/MEMORY.md and .../project/<YYYY-MM-DD>.md.
+Global memory keeps UltraRAG's own layout inside UltraRAG's UI storage tree: <storage-root>/memory/<user_id>/MEMORY.md and .../project/<YYYY-MM-DD>.md.
 
-Local memory is kept inside the project this server is bound to, at
-<project-root>/.memory-rag/, in the same shape and format, so a project's memory
-is private to that project and travels with it. The reference implementation keeps
-every scope under one storage tree; this package moves the project scope into the
-project and binds the project at startup. The remaining choices - the four-tool
-surface, validating the roots before serving, and the browser view - are listed in
-README.md and summarised below.
+Local memory is kept inside the project this server is bound to, at <project-root>/.memory-rag/, in the same shape and format, so a project's memory is private to that project and travels with it. The reference implementation keeps every scope under one storage tree; this package moves the project scope into the project and binds the project at startup. The remaining choices - the four-tool surface, validating the roots before serving, and the browser view - are listed in README.md and summarised below.
 
 THE BROWSER VIEW
 
-The optional browser view is built on ui-ultra-rag-mcp, an independent companion
-project that provides reusable local UI infrastructure for UltraRAG-derived MCP
-servers. It is not part of UltraRAG and carries no UltraRAG code; this package
-pins it by commit and supplies a thin adapter that calls this server's own tools.
+The optional browser view is built on ui-ultra-rag-mcp, an independent companion project that provides reusable local UI infrastructure for UltraRAG-derived MCP servers. It is not part of UltraRAG and carries no UltraRAG code; this package pins it by commit and supplies a thin adapter that calls this server's own tools.
 
-Memory is written from the page only through those tools, except for one write
-that has no tool: replacing a whole standing document. That write is atomic and is
-refused when the document changed since it was read, so it cannot silently drop a
-write made by an agent. It is listed in README.md's choice table.
+Memory is written from the page only through those tools, except for one write that has no tool: replacing a whole standing document. That write is atomic and is refused when the document changed since it was read, so it cannot silently drop a write made by an agent. It is listed in README.md's choice table.
 
-UltraRAG is developed by its team and contributors, including participants from
-THUNLP, Tsinghua University, NEUIR, Northeastern University, OpenBMB, and
-AI9stars. The UltraRAG name is used only to describe what this server serves.
+UltraRAG is developed by its team and contributors, including participants from THUNLP, Tsinghua University, NEUIR, Northeastern University, OpenBMB, and AI9stars. The UltraRAG name is used only to describe what this server serves.
 
-This project is an independent project. It is not an official release of
-UltraRAG and is not affiliated with or endorsed by UltraRAG, THUNLP, Tsinghua
-University, NEUIR, Northeastern University, OpenBMB, AI9stars, or their
-contributors.
+This project is an independent project. It is not an official release of UltraRAG and is not affiliated with or endorsed by UltraRAG, THUNLP, Tsinghua University, NEUIR, Northeastern University, OpenBMB, AI9stars, or their contributors.

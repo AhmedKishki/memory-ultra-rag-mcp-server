@@ -16,6 +16,7 @@ same arguments, and the project is bound at startup rather than named per call.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -28,7 +29,14 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from . import __version__
-from .config import ConfigurationError, ServerConfig, resolve_config
+from .config import (
+    PROJECT_ROOT_ENV_VAR,
+    STORAGE_ENV_VAR,
+    ULTRARAG_STORAGE_ENV_VAR,
+    ConfigurationError,
+    ServerConfig,
+    resolve_config,
+)
 from .instructions import SERVER_INSTRUCTIONS
 from .store import (
     StoreError,
@@ -42,6 +50,9 @@ from .store import (
 __all__ = ["SERVER_NAME", "create_server", "main"]
 
 SERVER_NAME = "memory-ultra-rag-mcp"
+
+#: The environment variable that turns the browser view on for every start.
+UI_PORT_ENV_VAR = "MEMORY_ULTRARAG_UI_PORT"
 
 UserIdParameter = Annotated[
     str,
@@ -201,6 +212,21 @@ def _saved(scope_directory: Path, written: Path) -> dict[str, Any]:
     }
 
 
+def _ui_port_from_environment() -> int | None:
+    """Return the browser-view port the environment asks for, if any."""
+    raw = os.environ.get(UI_PORT_ENV_VAR, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"{SERVER_NAME}: {UI_PORT_ENV_VAR} must be an integer between 1 and 65535",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=SERVER_NAME,
@@ -211,32 +237,29 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--project-root",
-        default=None,
+        default=os.environ.get(PROJECT_ROOT_ENV_VAR),
         help=(
             "Repository whose local memory is served. Local memory is kept in "
-            "<project-root>/.memory-rag. Required."
+            f"<project-root>/.memory-rag. Required, or {PROJECT_ROOT_ENV_VAR}."
         ),
     )
     parser.add_argument(
         "--storage-root",
         default=None,
         help=(
-            "UltraRAG UI storage tree holding every user's global memory. Defaults "
-            "to $ULTRARAG_UI_STORAGE_ROOT, then <workspace-root>/ui-storage."
+            "Where every user's global memory lives, as a normal directory. "
+            f"Defaults to ${STORAGE_ENV_VAR}, then ${ULTRARAG_STORAGE_ENV_VAR}, "
+            "then this account's home data directory."
         ),
-    )
-    parser.add_argument(
-        "--workspace-root",
-        default=None,
-        help="Directory for this server's own files (default: the user data dir).",
     )
     parser.add_argument(
         "--ui-port",
         type=int,
-        default=None,
+        default=_ui_port_from_environment(),
         help=(
             "Also serve a local browser view of this memory on this loopback port; "
-            "the view is reported on stderr and stops with this server."
+            "the view is reported on stderr and stops with this server. Defaults to "
+            f"${UI_PORT_ENV_VAR} when set."
         ),
     )
     return parser
@@ -256,7 +279,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = resolve_config(
             project_root=arguments.project_root,
             storage_root=arguments.storage_root,
-            workspace_root=arguments.workspace_root,
         )
     except ConfigurationError as error:
         print(f"{SERVER_NAME}: {error}", file=sys.stderr)

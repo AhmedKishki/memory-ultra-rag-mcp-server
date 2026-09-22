@@ -26,7 +26,7 @@ def _data(result: Any) -> Any:
     return json.loads(result.content[0].text)
 
 
-def _transport(project: Path, storage: Path, workspace: Path) -> StdioTransport:
+def _transport(project: Path, storage: Path) -> StdioTransport:
     return StdioTransport(
         command=sys.executable,
         args=[
@@ -36,8 +36,6 @@ def _transport(project: Path, storage: Path, workspace: Path) -> StdioTransport:
             str(project),
             "--storage-root",
             str(storage),
-            "--workspace-root",
-            str(workspace),
         ],
     )
 
@@ -56,14 +54,14 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
     notes.mkdir()
 
     async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
-        async with Client(_transport(thesis, storage, tmp_path / "ws")) as client:
+        async with Client(_transport(thesis, storage)) as client:
             saved = _data(
                 await client.call_tool(
                     "save_local_memory",
                     {"q_ls": ["Thesis question"], "ans_ls": ["Thesis answer"]},
                 )
             )
-        async with Client(_transport(notes, storage, tmp_path / "ws")) as client:
+        async with Client(_transport(notes, storage)) as client:
             other = _data(await client.call_tool("get_local_memory", {}))
             return saved, other
 
@@ -89,12 +87,12 @@ def test_both_projects_share_the_global_memory(
     notes.mkdir()
 
     async def scenario() -> tuple[str, str]:
-        async with Client(_transport(thesis, storage, tmp_path / "ws")) as client:
+        async with Client(_transport(thesis, storage)) as client:
             await client.call_tool(
                 "save_memory",
                 {"user_id": "ahmed", "q_ls": ["Global fact"], "ans_ls": ["Noted."]},
             )
-        async with Client(_transport(notes, storage, tmp_path / "ws")) as client:
+        async with Client(_transport(notes, storage)) as client:
             read = _data(
                 await client.call_tool("get_global_memory", {"user_id": "ahmed"})
             )
