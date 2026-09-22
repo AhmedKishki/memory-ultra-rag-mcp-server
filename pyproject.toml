@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memory-ultra-rag-mcp"
+version = "0.1.0"
+description = "Serve UltraRAG's own memory server over stdio MCP, unmodified"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Ahmed Kishki" }]
+keywords = ["mcp", "memory", "ultrarag", "agent-continuity"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    # The pinned versions of the target UltraRAG revision's own lockfile.
+    "fastmcp==3.4.0",
+    "platformdirs==4.11.10",
+    # The upstream memory server imports `ultrarag.server`, so the child process
+    # needs UltraRAG's own dependency set. It is installed here exactly as the
+    # other UltraRAG-based servers in this collection install it.
+    "ultrarag @ https://github.com/OpenBMB/UltraRAG/archive/3a709a2aea3fbe46acca59c422621c94b6e86857.tar.gz#sha256=cb7b7b10dd8eacecd43d7e6705baea4cd431710e7016a0b66673c56821accece",
+]
+
+[project.scripts]
+memory-ultra-rag-mcp = "memory_ultra_rag_mcp.server:main"
+
+[project.urls]
+Repository = "https://github.com/AhmedKishki/memory-ultra-rag-mcp-server"
+Issues = "https://github.com/AhmedKishki/memory-ultra-rag-mcp-server/issues"
+"Upstream UltraRAG" = "https://github.com/OpenBMB/UltraRAG"
+"UltraRAG Documentation" = "https://ultrarag.openbmb.cn/"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff>=0.7.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "integration: starts the real UltraRAG memory server in a child process",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"

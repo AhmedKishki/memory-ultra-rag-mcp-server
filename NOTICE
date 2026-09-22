@@ -1,0 +1,37 @@
+Memory UltraRAG MCP
+Copyright 2026 Ahmed Kishki
+
+This project is licensed under the Apache License, Version 2.0. See LICENSE.
+
+ULTRARAG ATTRIBUTION
+
+Memory UltraRAG MCP serves UltraRAG's own memory server, unmodified, from a
+pinned checkout of https://github.com/OpenBMB/UltraRAG.
+
+  Upstream revision: 3a709a2aea3fbe46acca59c422621c94b6e86857
+  Declared version:  0.3.0.2
+  Served file:       servers/memory/src/memory.py
+  Upstream license:  Apache License 2.0
+
+The memory model, the tools `get_global_memory` and `save_memory`, the file
+names, the file formats, and the storage behaviour are UltraRAG's. No UltraRAG
+source file is copied, patched, vendored, or redistributed by this package: the
+upstream server is started from the user's own checkout, in place, as a child
+process, and its tools are proxied unchanged.
+
+The differences this package makes are entry-point differences and are listed in
+README.md: the server is installable and runs over stdio; its storage root is
+passed in rather than derived from the checkout's location; its child process runs
+in, and logs to, a workspace directory; the pinned revision and version are
+validated before anything starts; and the exposed surface is narrowed to the two
+memory tools, because UltraRAG's server base class also registers a pipeline
+`build` tool that has no pipeline to build here.
+
+UltraRAG is developed by its team and contributors, including participants from
+THUNLP, Tsinghua University, NEUIR, Northeastern University, OpenBMB, and
+AI9stars. The UltraRAG name is used only to describe what this server serves.
+
+This project is an independent project. It is not an official release of
+UltraRAG and is not affiliated with or endorsed by UltraRAG, THUNLP, Tsinghua
+University, NEUIR, Northeastern University, OpenBMB, AI9stars, or their
+contributors.
