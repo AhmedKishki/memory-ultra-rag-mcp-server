@@ -56,6 +56,7 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
     "integration: starts the real stdio server in a child process",
+    "upstream: compares against a UltraRAG checkout when ULTRARAG_CHECKOUT is set",
 ]
 
 [tool.ruff]

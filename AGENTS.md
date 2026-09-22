@@ -32,9 +32,11 @@ uv run --frozen ruff format --check .
 uv run --frozen ruff check .
 uv run --frozen pytest
 uv build
+# optional, and the strongest fidelity check: compare against a real checkout
+ULTRARAG_CHECKOUT=/ABSOLUTE/PATH/TO/UltraRAG uv run --frozen pytest -m upstream
 ```
 
-The suite needs no UltraRAG checkout, and the integration tests start the real stdio server twice: once per project, over one shared storage tree. The browser view's own suite drives the adapter in memory and the routes over a test client.
+The suite needs no UltraRAG checkout, and the integration tests start the real stdio server twice: once per project, over one shared storage tree. The browser view's own suite drives the adapter in memory and the routes over a test client. The comparison test runs upstream's own memory server from a checkout when `ULTRARAG_CHECKOUT` names one, and skips otherwise.
 
 ## Attribution
 

@@ -141,6 +141,12 @@ uv build
 
 The suite runs without any UltraRAG checkout. It covers one scope's behaviour (template, create-on-read, round format, append, day rollover, refusals), the four tools over the real stdio server, project isolation between two projects, the shared global tree, a byte-for-byte comparison against the files UltraRAG's own server produced (`tests/fixtures/upstream/README.md` records how they were captured), and the browser view: its scopes, its reads, its two writes, the scope a request may name, and the routes a page can call.
 
+The formats are also compared against a **real** checkout when you have one: point `ULTRARAG_CHECKOUT` at it and `tests/test_upstream_differential.py` starts that checkout's own `servers/memory/src/memory.py` over stdio, gives it the same inputs, and compares the bytes both wrote, the payload keys both returned, and the surface differences this package chose. It is the assurance a wrapper would have given by construction, without depending on a checkout at runtime.
+
+```bash
+ULTRARAG_CHECKOUT=/ABSOLUTE/PATH/TO/UltraRAG uv run --frozen pytest -m upstream
+```
+
 ## Credit and licensing
 
 The memory model, the tools `get_global_memory` and `save_memory`, the file names, and the file formats are UltraRAG's, from [`OpenBMB/UltraRAG`](https://github.com/OpenBMB/UltraRAG) at commit `3a709a2` (Apache-2.0). Credit belongs to the UltraRAG team and contributors, including participants from THUNLP, NEUIR, OpenBMB, and AI9stars.
