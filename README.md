@@ -8,10 +8,10 @@ UI shows.
 This is not a second memory design. The memory model, the tools, the file
 formats, and the storage behaviour all belong to UltraRAG; this package starts
 that server from a pinned checkout, gives it a storage root it can actually
-write to, and proxies it. Its sibling
-[`graph-memory-ultra-rag-mcp-server`](../graph-memory-ultra-rag-mcp-server) is
-the project that extends memory into a typed, relational store; this one is the
-vanilla memory, kept deliberately small.
+write to, and proxies it. Its sibling, the graph memory server
+([`graph-memory-ultra-rag-mcp-server`](https://github.com/AhmedKishki/graph-memory-ultra-rag-mcp-server)),
+is the project that extends memory into a typed, relational store; this one is
+the vanilla memory, kept deliberately small.
 
 ## What it is not
 
