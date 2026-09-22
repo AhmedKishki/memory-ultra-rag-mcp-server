@@ -550,6 +550,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigurationError as error:
         print(f"{UI_NAME}: {error}", file=sys.stderr)
         return 2
+    if not _port_is_available(arguments.host, arguments.port):
+        print(
+            f"{UI_NAME}: port {arguments.port} is already in use on "
+            f"{arguments.host}; choose another --port",
+            file=sys.stderr,
+        )
+        return 2
     print(
         f"{UI_NAME}: serving {config.local_directory} and {config.global_root} at "
         f"http://{arguments.host}:{arguments.port}",

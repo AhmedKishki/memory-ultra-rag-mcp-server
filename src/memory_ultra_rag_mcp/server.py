@@ -88,7 +88,8 @@ def create_server(
     """Create the server that serves one project's memory and the global tree.
 
     With ``ui_port`` the same process also serves the browser view of exactly the
-    memory these tools serve; without it nothing of the browser stack is loaded.
+    memory these tools serve. Without it, nothing of this package's view module is
+    imported and no port is opened.
     """
     holder: dict[str, Any] = {}
 
@@ -97,8 +98,8 @@ def create_server(
         if ui_port is None:
             yield {}
             return
-        # Imported lazily so a server that serves no view never loads uvicorn and
-        # starlette, and so this module does not import the view that imports it.
+        # Imported lazily because this module is imported by the view that imports
+        # it, and because a server that serves no view needs none of its code.
         from .ui import UIPort
 
         view = UIPort(config, port=ui_port)

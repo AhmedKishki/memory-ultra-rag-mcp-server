@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from pathlib import Path
 
 import pytest
@@ -181,6 +182,29 @@ def test_the_profile_asks_for_no_document_workspace(tmp_path: Path) -> None:
     assert status["project_root"] == str(config.project_root)
     assert status["ready"] is False
     assert search.status_code == 404
+
+
+def test_the_command_line_refuses_a_taken_port(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        probe.listen(1)
+        port = probe.getsockname()[1]
+        code = ui.main(
+            ["--project-root", str(config.project_root), "--port", str(port)]
+        )
+
+    assert code == 2
+    assert "already in use" in capsys.readouterr().err
+
+
+def test_the_command_line_requires_a_project_root(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert ui.main([]) == 2
+    assert "--project-root is required" in capsys.readouterr().err
 
 
 def test_the_routes_serve_the_view(tmp_path: Path) -> None:
