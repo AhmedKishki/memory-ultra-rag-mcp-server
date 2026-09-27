@@ -90,20 +90,18 @@ def test_both_projects_share_the_global_memory(
     async def scenario() -> tuple[dict[str, Any], str]:
         async with Client(_transport(thesis, storage)) as client:
             await client.call_tool(
-                "set_memory_global",
-                {"user_id": "ahmed", "content": "Prefer British English"},
+                "set_memory_global", {"content": "Prefer British English"}
             )
         async with Client(_transport(notes, storage)) as client:
             read = _data(
-                await client.call_tool(
-                    "get_memory_global", {"user_id": "ahmed", "query": "English"}
-                )
+                await client.call_tool("get_memory_global", {"query": "English"})
             )
             return read, read["searched"]["directory"]
 
     read, directory = asyncio.run(scenario())
-    assert directory == str(storage / "memory" / "ahmed")
+    assert directory == str(storage / "memory" / "default")
     assert [unit["text"] for unit in read["units"]] == ["Prefer British English"]
     assert read["scope"] == "global"
-    # The second project's server read the same global tree.
+    # The second project's server read the same global memory, which is the
+    # account's one, and not a per-project copy.
     assert "Prefer British English" in json.dumps(read)

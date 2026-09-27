@@ -3,9 +3,9 @@
 **Purpose:** serve UltraRAG's memory to an agent over stdio MCP, in two kinds:
 
 - **local memory** belongs to the project this server is bound to and lives inside that repository, under `.memory-rag`, so a project carries its memory with it and no other project reads it;
-- **global memory** belongs to a user and lives in UltraRAG's shared storage tree, so every instance serving that tree reads the same memory. It is the user's, not the project's: who they are, what they want remembered everywhere, and the **durable rules that apply wherever they work**.
+- **global memory** belongs to the account and lives in UltraRAG's shared storage tree, so every instance serving that tree reads the same memory. It is not a project's: who the user is, what they want remembered everywhere, and the **durable rules that apply wherever they work**.
 
-Both kinds work the same way: a standing document plus one dated dialogue file per day, written in UltraRAG's format. The agent chooses which kind a write goes to, and the two tools of each kind take the same arguments. A standing instruction the user gave once belongs in global memory's standing document, where it is read at the start of every conversation, rather than in a dated round.
+Both kinds work the same way: a standing document plus one dated dialogue file per day, written in UltraRAG's format. The agent chooses which kind a write goes to, and the two tools of each kind take the same arguments apart from the global pair's absence of a `user_id`. A standing instruction the user gave once belongs in global memory's standing document, where it is read at the start of every conversation, rather than in a dated round.
 
 The behaviour, the tool names, the file names, and the byte formats are UltraRAG's, taken from `servers/memory/src/memory.py` at the pinned revision below and checked against files that revision produced. The difference this package makes is where a project's memory lives: UltraRAG keeps everything under one storage tree, and this server keeps each project's memory inside the project. What the extension is, and what it deliberately leaves alone, is decided in [ADR 0001](docs/decisions/0001-extend-ultrarag-memory.md).
 
@@ -50,7 +50,7 @@ uv sync --frozen
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--project-root` or `MEMORY_ULTRARAG_PROJECT_ROOT` | The repository whose local memory is served | required |
-| `--storage-root` or `MEMORY_ULTRARAG_STORAGE_ROOT` | Where every user's global memory lives, as a normal directory | `$ULTRARAG_UI_STORAGE_ROOT`, then this account's home data directory |
+| `--storage-root` or `MEMORY_ULTRARAG_STORAGE_ROOT` | Where the account's global memory lives, as a normal directory | `$ULTRARAG_UI_STORAGE_ROOT`, then this account's home data directory |
 | `--ui-port` or `MEMORY_ULTRARAG_UI_PORT` | Also serve a browser view of this memory on this loopback port | off |
 
 The first root is inside the project and the second is in the account's home, and each can be moved without touching the other. `memory-ultra-rag-ui` takes the same `--project-root` and `--storage-root`, plus `--host` and `--port`.
@@ -63,10 +63,10 @@ One server instance serves one project, so `--project-root` binds the session: l
 | --- | --- | --- |
 | `get_memory_local` | `query`, `limit=10` | Answers a question from this project's memory. |
 | `set_memory_local` | `content` | Records one statement in this project's standing memory. |
-| `get_memory_global` | `query`, `user_id="default"`, `limit=10` | Answers a question from that user's memory. |
-| `set_memory_global` | `content`, `user_id="default"` | Records one statement in that user's standing memory. |
+| `get_memory_global` | `query`, `limit=10` | Answers a question from the account's global memory. |
+| `set_memory_global` | `content` | Records one statement in the account's global standing memory. |
 
-Two verbs, two scopes, and the scope in the name, so the only decision an agent makes is whether a memory is this project's or this user's. A `user_id` holds letters, digits, `_` and `-`, which is both upstream's rule and what keeps a user's memory to one directory.
+Two verbs, two scopes, and the scope in the name, so the only decision an agent makes is whether a memory is this project's or the account's. There is no `user_id`: **one server is bound to one project**, and that project reaches exactly two memories — its own, inside its repository, and the one global memory, which belongs to the account and is shared by every project on the same storage root.
 
 **A read takes a query, and returns only what matched.** These memories grow by appending, so handing one to a model whole would spend the context window on the file instead of on the work. A read searches the scope's files and answers with:
 
@@ -92,7 +92,7 @@ memory-ultra-rag-ui --project-root /ABSOLUTE/PATH/TO/my-project
 memory-ultra-rag-mcp --project-root /ABSOLUTE/PATH/TO/my-project --ui-port 5052
 ```
 
-The view shows the bound project's memory and every user's global memory **together**, as one block per scope, newest rounds first:
+The view shows the bound project's memory and the account's global memory **together**, as one block per scope, newest rounds first:
 
 - each block names its scope, its directory, how many rounds it holds, and its latest date;
 - that scope's **standing memory**, whole, with a copy button;
@@ -108,10 +108,12 @@ The view shows the bound project's memory and every user's global memory **toget
 <project-root>/.memory-rag/MEMORY.md                  the project's standing memory
 <project-root>/.memory-rag/project/<date>.md          the project's rounds, by day
 <project-root>/.memory-rag/index.sqlite3              derived search index, disposable
-<storage-root>/memory/<user_id>/MEMORY.md             a user's standing memory
-<storage-root>/memory/<user_id>/project/<date>.md     that user's rounds, by day
-<storage-root>/memory/<user_id>/index.sqlite3         derived search index, disposable
+<storage-root>/memory/default/MEMORY.md            the account's global standing memory
+<storage-root>/memory/default/project/<date>.md      its rounds, by day
+<storage-root>/memory/default/index.sqlite3          derived search index, disposable
 ```
+
+The global memory lives in `memory/default/`: `memory` is UltraRAG's own directory name, and `default` is the user it names when none is given, which keeps the layout upstream's and keeps a UltraRAG UI able to read it. It is one memory, not one per user, and the tools take no identifier for it.
 
 A standing document holds statements, one block per write, after the template UltraRAG seeds it with:
 
@@ -152,7 +154,7 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 - **Nothing removes or corrects a statement.** A statement is appended; the standing document is replaced only through the browser view or by hand, and a dated round is never edited.
 - **No session tier.** Every statement is durable; nothing expires.
 - **No typed or relational structure.** The memory model is upstream's, deliberately.
-- **No cross-scope read.** One call reads one scope, so nothing can quietly sweep a project's memory into another's.
+- **No cross-scope read.** One call reads one scope, so nothing can quietly sweep a project's memory into another's, and a project is reachable only by the server bound to it.
 
 ## The choices this package makes
 
@@ -161,18 +163,19 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 1 | Local memory is kept inside the project, under `.memory-rag` | isolation is the point: a project's memory is private to that project and travels with it |
 | 2 | The project is bound at startup, and the project tools take no project argument | one session means one project, so local memory cannot be written into the wrong one |
 | 3 | Global memory keeps UltraRAG's layout in the storage tree | the shared memory stays where a UltraRAG UI already reads it |
-| 4 | The file names and formats are UltraRAG's, and the two kinds share one implementation | a project's memory and a user's memory have one shape, so either can be read the same way, and a UltraRAG UI already reads the shared one |
+| 4 | The file names and formats are UltraRAG's, and the two kinds share one implementation | a project's memory and the global one have one shape, so either can be read the same way, and a UltraRAG UI already reads the global one |
 | 5 | The surface is four tools, and this server is not a UltraRAG pipeline node | UltraRAG's server base class registers a pipeline `build` tool, and its runner wires servers through generated `server.yaml` files and `output=` annotations. Both belong to a pipeline deployment, so this package ships neither and depends on no UltraRAG code: memory here is a complete solution for a project and an account, served to agents and people directly, not a stage inside someone else's pipeline |
 | 6 | The reference revision and its captured output are committed and tested | the format cannot drift quietly: a change fails `tests/test_fidelity.py` |
 | 7 | The browser view is the shared `ui-ultra-rag-mcp` package through a thin adapter, pinned by commit | interface code stays in one repository, and this package keeps no second UI |
 | 8 | The page reaches memory only through this server: no directory is handed to the browser | one reader and one writer per file, and the page shows what an agent reads |
 | 9 | Replacing the standing document is this package's own write, guarded by the digest the page read | upstream only creates that document from its template, and a plain overwrite could drop an agent's write |
-| 10 | Global memory defaults to this account's home data directory, and moves by flag or variable | it belongs to the user rather than to a project, and the default follows the sibling repositories' pattern: one flag, one variable, a place in the home directory |
+| 10 | Global memory defaults to this account's home data directory, and moves by flag or variable | it belongs to the account rather than to a project, and the default follows the sibling repositories' pattern: one flag, one variable, a place in the home directory |
 | 11 | The tool names are renamed to two verbs and two scopes, and upstream's names are not re-exposed | the agent's only decision should be which kind of memory it is, so the scope is in the name and there is nothing else to choose between |
 | 12 | A read takes a query and answers it, and no tool returns a memory whole | a memory grows by appending; reading it whole spends the context window on the file instead of on the work, and would be unusable after a few weeks |
 | 13 | The search runs over an FTS5 index built from the memory's own files, kept beside them and disposable | a read is then a lookup and a page of rows rather than a pass over every dated file, so its cost does not grow with the memory; the files stay the record, so an index is never the thing that is true |
 | 14 | The index follows the files instead of leading them, and no write path updates it | a memory edited by hand or by a UltraRAG UI is read correctly, because a read compares each file against what was indexed and re-reads only what changed |
 | 15 | A statement is appended to the standing document, and the dated files stay the exchange history | a statement is not an exchange, and attributing one to the user or to an assistant would put a claim in the file that nobody made |
+| 16 | Global memory has no `user_id`: it is the account's one memory, in the directory upstream uses for the user it is given when none is named | a project is identified by the repository it is bound to, so a user dimension would be a second identity for something already identified; the directory is left as upstream's so the layout, an existing store, and a UltraRAG UI are unaffected |
 
 ## Develop and test
 

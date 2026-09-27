@@ -13,7 +13,7 @@ from memory_ultra_rag_mcp.config import (
     ULTRARAG_STORAGE_ENV_VAR,
     ConfigurationError,
     default_storage_root,
-    global_memory_root,
+    global_directory,
     resolve_config,
 )
 
@@ -46,8 +46,8 @@ def test_global_memory_lives_under_the_storage_root(tmp_path: Path) -> None:
     resolved = resolve_config(project_root=project, storage_root=storage)
 
     assert resolved.storage_root == storage.resolve()
-    assert resolved.global_root == storage.resolve() / "memory"
-    assert resolved.global_root == global_memory_root(storage.resolve())
+    assert resolved.global_directory == storage.resolve() / "memory" / "default"
+    assert resolved.global_directory == global_directory(storage.resolve())
 
 
 def test_the_storage_root_defaults_to_the_accounts_home_data_directory() -> None:
@@ -65,7 +65,7 @@ def test_the_default_storage_root_is_used_without_any_setting(tmp_path: Path) ->
     resolved = resolve_config(project_root=project)
 
     assert resolved.storage_root == default_storage_root()
-    assert resolved.global_root == default_storage_root() / "memory"
+    assert resolved.global_directory == default_storage_root() / "memory" / "default"
 
 
 def test_this_projects_variable_moves_global_memory(
@@ -79,7 +79,7 @@ def test_this_projects_variable_moves_global_memory(
     resolved = resolve_config(project_root=project)
 
     assert resolved.storage_root == moved.resolve()
-    assert resolved.global_root == moved.resolve() / "memory"
+    assert resolved.global_directory == moved.resolve() / "memory" / "default"
 
 
 def test_ultrarags_own_variable_is_honored_for_interoperability(
@@ -92,7 +92,7 @@ def test_ultrarags_own_variable_is_honored_for_interoperability(
 
     resolved = resolve_config(project_root=project)
     assert resolved.storage_root == shared.resolve()
-    assert resolved.global_root == shared.resolve() / "memory"
+    assert resolved.global_directory == shared.resolve() / "memory" / "default"
 
 
 def test_this_projects_variable_wins_over_ultrarags(

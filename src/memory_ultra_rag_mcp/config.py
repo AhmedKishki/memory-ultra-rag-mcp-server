@@ -22,6 +22,7 @@ from platformdirs import user_data_path
 __all__ = [
     "APP_NAME",
     "GLOBAL_MEMORY_DIRNAME",
+    "GLOBAL_SCOPE_DIRECTORY",
     "LOCAL_STATE_DIRNAME",
     "PROJECT_ROOT_ENV_VAR",
     "STORAGE_ENV_VAR",
@@ -29,6 +30,7 @@ __all__ = [
     "ConfigurationError",
     "ServerConfig",
     "default_storage_root",
+    "global_directory",
     "global_memory_root",
     "resolve_config",
 ]
@@ -47,8 +49,15 @@ STORAGE_ENV_VAR = "MEMORY_ULTRARAG_STORAGE_ROOT"
 #: UltraRAG's own variable for its UI storage tree, honored for interoperability.
 ULTRARAG_STORAGE_ENV_VAR = "ULTRARAG_UI_STORAGE_ROOT"
 
-#: The directory inside the storage root that holds every user's global memory.
+#: The directory inside the storage root that holds global memory, which is
+#: UltraRAG's own name for it.
 GLOBAL_MEMORY_DIRNAME = "memory"
+
+#: The one directory under that tree that holds the global memory. There is one
+#: global memory, not one per user: this server serves the account's memory, and
+#: the directory is named as UltraRAG names it when no user is given, so the
+#: layout stays upstream's and a UltraRAG UI reads it without being told anything.
+GLOBAL_SCOPE_DIRECTORY = "default"
 
 
 class ConfigurationError(ValueError):
@@ -62,22 +71,28 @@ class ServerConfig:
     project_root: Path
     local_directory: Path
     storage_root: Path
-    global_root: Path
+    global_directory: Path
 
 
 def default_storage_root() -> Path:
     """Return the home data directory that holds global memory by default.
 
     The default belongs to the account, not to a project, so every project this
-    user opens reads the same global memory. ``--storage-root``,
+    account opens reads the same one global memory. ``--storage-root``,
     ``MEMORY_ULTRARAG_STORAGE_ROOT``, or ``ULTRARAG_UI_STORAGE_ROOT`` move it.
     """
     return Path(user_data_path(APP_NAME, appauthor=False))
 
 
 def global_memory_root(storage_root: Path) -> Path:
-    """Return the directory holding every user's global memory."""
+    """Return the tree that holds global memory, as UltraRAG lays it out."""
     return storage_root / GLOBAL_MEMORY_DIRNAME
+
+
+def global_directory(storage_root: Path) -> Path:
+    """Return the one directory that holds the global memory."""
+
+    return global_memory_root(storage_root) / GLOBAL_SCOPE_DIRECTORY
 
 
 def resolve_config(
@@ -107,7 +122,7 @@ def resolve_config(
         project_root=project,
         local_directory=local,
         storage_root=storage,
-        global_root=global_memory_root(storage),
+        global_directory=global_directory(storage),
     )
 
 

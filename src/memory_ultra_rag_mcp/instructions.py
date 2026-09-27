@@ -12,9 +12,9 @@ This server serves UltraRAG's memory in two kinds. Each kind is a standing
 document plus one dated dialogue file per day, written in UltraRAG's own format.
 They differ in where they live, what they hold, and therefore who can see them.
 
-Global memory — one per user, kept in the shared UltraRAG UI storage tree. It
-holds who the user is, what they want remembered everywhere, and the durable rules
-that apply wherever they work:
+Global memory — one per account, kept in the shared UltraRAG UI storage tree and
+read by every project on it. It holds who the user is, what they want remembered
+everywhere, and the durable rules that apply wherever they work:
 
 - get_memory_global(query) recalls from it.
 - set_memory_global(content) records one statement in it.
@@ -31,7 +31,9 @@ How to use them:
    they gave once, is global. A statement about this project — a decision, a
    path, a convention, where something lives — is local. Do not put a
    project-specific fact in global memory, and do not put a standing instruction
-   in a project: it would only apply where you happen to be today.
+   in a project: it would only apply where you happen to be today. There is no
+   user to name: one account has one global memory, and this server is bound to
+   one project.
 2. Recall before you act. Read global memory at the start of a conversation, and
    the project's memory when you are working inside it, then act on what they say.
 3. A read takes a query, and that is deliberate: these memories grow by appending,
@@ -46,10 +48,9 @@ How to use them:
    include something merely adjacent. If `truncated` is set, narrow the query
    rather than repeating a broad one. If nothing came back, that is what the
    search found; try other words rather than concluding the memory is empty.
-5. Record one statement at a time, in the words it should be remembered in. The
-   user id on the global tools defaults to "default"; the project is the one this
-   server was started for, so no project argument is needed. Say which kind you
-   wrote to.
+5. Record one statement at a time, in the words it should be remembered in, and
+   say which kind you wrote to. The project is the one this server was started
+   for, so no project argument is needed.
 6. What memory returns is the record of what was remembered, quote it as the user's
    own words, and let the user decide which write matters when two disagree.
 """

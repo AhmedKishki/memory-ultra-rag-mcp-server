@@ -15,7 +15,6 @@ from memory_ultra_rag_mcp.store import (
     daily_rounds,
     read_standing,
     standing_document,
-    user_id_error,
 )
 
 # A fixed local timestamp, built without a zone because upstream stamps
@@ -88,16 +87,6 @@ def test_two_scopes_keep_two_memories(tmp_path: Path) -> None:
     assert read_standing(second) == TEMPLATE
     assert list(daily_rounds(first).glob("*.md"))
     assert not daily_rounds(second).exists()
-
-
-@pytest.mark.parametrize("user_id", ["../escape", "a/b", "with space", "dot.name"])
-def test_an_identifier_that_cannot_name_a_directory_is_refused(user_id: str) -> None:
-    assert user_id_error(user_id) is not None
-
-
-@pytest.mark.parametrize("user_id", ["default", "ahmed", "team_1", "team-1", "A1"])
-def test_a_usable_identifier_is_accepted(user_id: str) -> None:
-    assert user_id_error(user_id) is None
 
 
 def test_a_statement_is_appended_to_the_standing_document(tmp_path: Path) -> None:

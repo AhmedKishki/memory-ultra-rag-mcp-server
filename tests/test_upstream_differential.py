@@ -23,13 +23,19 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
+from fastmcp.exceptions import ToolError
 
 from memory_ultra_rag_mcp.config import global_memory_root
 from memory_ultra_rag_mcp.store import append_round
 
 pytestmark = pytest.mark.upstream
 
-USER_ID = "comparison"
+#: The user both sides are compared as. Upstream's memory is keyed by user, and
+#: this server keeps one global memory in the directory upstream uses for the user
+#: it is given when none is named, so both sides write the same files and the
+#: bytes can be compared. The asymmetry is deliberate and asserted below: upstream
+#: takes a user_id, this server does not.
+USER_ID = "default"
 QUESTION = "Where does the draft live?"
 ANSWER = "In the project directory."
 
@@ -99,6 +105,37 @@ def _our_transport(project: Path, storage: Path, workspace: Path) -> StdioTransp
     )
 
 
+def _workspace(root: Path) -> Path:
+    """Return a scratch directory for a child process to run and log in."""
+
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
+
+
+async def _upstream_parameters(transport: StdioTransport) -> dict[str, set[str]]:
+    """Return the parameters each of upstream's own tools takes."""
+
+    async with Client(transport, init_timeout=120) as client:
+        listed = await client.list_tools()
+        return {
+            tool.name: set(tool.inputSchema.get("properties", {})) for tool in listed
+        }
+
+
+async def _upstream_refuses_a_bad_user(transport: StdioTransport) -> bool:
+    """Report whether upstream still refuses a user id that could not name a directory."""
+
+    async with Client(transport, init_timeout=120) as client:
+        try:
+            await client.call_tool(
+                "get_global_memory", {"user_id": "../escape"}, raise_on_error=True
+            )
+        except ToolError:
+            return True
+    return False
+
+
 async def _exercise_upstream(transport: StdioTransport) -> tuple[list[str], dict]:
     """Read and write one exchange through upstream's own two tools."""
 
@@ -126,11 +163,7 @@ async def _exercise_ours(
 
     async with Client(transport, init_timeout=120) as client:
         tools = sorted(tool.name for tool in await client.list_tools())
-        read = _data(
-            await client.call_tool(
-                "get_memory_global", {"user_id": USER_ID, "query": "MEMORY"}
-            )
-        )
+        read = _data(await client.call_tool("get_memory_global", {"query": "MEMORY"}))
     append_round(global_memory_root(storage) / USER_ID, [QUESTION], [ANSWER])
     return tools, read
 
@@ -210,3 +243,32 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     assert "get_global_memory" not in our_tools
     assert "save_memory" not in our_tools
     assert {"get_global_memory", "save_memory"} <= set(upstream_tools)
+
+    # The user dimension is upstream's, not this server's: upstream still keys its
+    # memory by user and still refuses an identifier that could not name a
+    # directory, while the global tools here take no such parameter and serve the
+    # account's one memory (ADR 0001).
+    upstream_parameters = asyncio.run(
+        _upstream_parameters(
+            _upstream_transport(tmp_path / "surface", _workspace(tmp_path))
+        )
+    )
+    assert "user_id" in upstream_parameters["get_global_memory"]
+    assert "user_id" in upstream_parameters["save_memory"]
+    our_parameters = {
+        name: set(schemas)
+        for name, schemas in (
+            ("get_memory_global", {"query", "limit"}),
+            ("set_memory_global", {"content"}),
+        )
+    }
+    assert "user_id" not in our_parameters["get_memory_global"]
+    assert "user_id" not in our_parameters["set_memory_global"]
+    assert (
+        asyncio.run(
+            _upstream_refuses_a_bad_user(
+                _upstream_transport(tmp_path / "refusal", _workspace(tmp_path))
+            )
+        )
+        is True
+    )

@@ -79,23 +79,21 @@ def test_a_global_statement_is_written_under_the_storage_root(tmp_path: Path) ->
         async with Client(app) as client:
             recorded = _data(
                 await client.call_tool(
-                    "set_memory_global",
-                    {"user_id": "ahmed", "content": "always cite the commit"},
+                    "set_memory_global", {"content": "always cite the commit"}
                 )
             )
-            read = _data(
-                await client.call_tool(
-                    "get_memory_global", {"user_id": "ahmed", "query": "cite"}
-                )
-            )
+            read = _data(await client.call_tool("get_memory_global", {"query": "cite"}))
             return recorded, read
 
     recorded, read = asyncio.run(scenario())
-    assert recorded["directory"] == str(config.global_root / "ahmed")
+    # One global memory for the account, in the directory UltraRAG lays out for
+    # the user it is given when none is named.
+    assert recorded["directory"] == str(config.global_directory)
+    assert config.global_directory == config.storage_root / "memory" / "default"
     assert read["scope"] == "global"
     assert [unit["text"] for unit in read["units"]] == ["always cite the commit"]
     assert read["units"][0]["kind"] == "statement"
-    assert (config.global_root / "ahmed" / "MEMORY.md").is_file()
+    assert (config.global_directory / "MEMORY.md").is_file()
 
 
 def test_a_read_returns_the_matching_units_and_nothing_else(tmp_path: Path) -> None:
@@ -275,11 +273,11 @@ def test_the_two_kinds_do_not_share_a_directory(tmp_path: Path) -> None:
 
     local, default_user = asyncio.run(scenario())
     assert local["searched"]["directory"] == str(config.local_directory)
-    assert default_user["searched"]["directory"] == str(config.global_root / "default")
+    assert default_user["searched"]["directory"] == str(config.global_directory)
     # A first read brings each scope into being, as upstream does, and each scope
     # indexes its own files.
     assert (config.local_directory / "MEMORY.md").is_file()
-    assert (config.global_root / "default" / "MEMORY.md").is_file()
+    assert (config.global_directory / "MEMORY.md").is_file()
     assert local["searched"]["index"] != default_user["searched"]["index"]
     assert local["units"] == []
     assert default_user["units"] == []
@@ -312,17 +310,23 @@ def test_a_project_read_cannot_see_another_projects_memory(tmp_path: Path) -> No
     assert missing["units"] == []
 
 
-def test_an_unusable_user_id_is_refused(tmp_path: Path) -> None:
+def test_the_global_tools_take_no_user(tmp_path: Path) -> None:
+    """There is one global memory, so there is nothing to name."""
+
     app = server.create_server(_config(tmp_path))
 
-    async def scenario() -> None:
+    async def scenario() -> list[set[str]]:
         async with Client(app) as client:
-            await client.call_tool(
-                "get_memory_global", {"user_id": "../escape", "query": "x"}
-            )
+            tools = {tool.name: tool for tool in await client.list_tools()}
+            names = {
+                name: set(tools[name].inputSchema.get("properties", {}))
+                for name in ("get_memory_global", "set_memory_global")
+            }
+            return [names["get_memory_global"], names["set_memory_global"]]
 
-    with pytest.raises(ToolError, match="Invalid user_id format"):
-        asyncio.run(scenario())
+    get_parameters, set_parameters = asyncio.run(scenario())
+    assert get_parameters == {"query", "limit"}
+    assert set_parameters == {"content"}
 
 
 def test_an_empty_statement_is_refused(tmp_path: Path) -> None:

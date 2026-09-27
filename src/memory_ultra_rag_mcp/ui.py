@@ -57,7 +57,6 @@ from .store import (
     list_rounds,
     read_standing,
     standing_digest,
-    user_id_error,
     write_standing,
 )
 
@@ -81,7 +80,7 @@ DEFAULT_PORT = 5052
 LOCAL_SCOPE = "local"
 
 #: A user's global memory, as the browser names it; the identifier follows.
-GLOBAL_SCOPE_PREFIX = "global:"
+GLOBAL_SCOPE = "global"
 
 
 def version_label() -> str:
@@ -150,39 +149,18 @@ def version_label() -> str:
     return " · ".join(parts)
 
 
-def global_scopes(config: ServerConfig) -> list[str]:
-    """Return the user scopes the shared tree holds, the default one first.
+def require_global_scope(scope: str) -> str:
+    """Return the scope if it is the one global scope, and refuse any other.
 
-    Listing the tree is this server's business: the browser never reads a
-    directory, it only sends back a scope this function reported.
+    A scope arrives from the browser, so it is checked here before it names
+    anything. There is one global memory, so there is exactly one global scope:
+    nothing a page sends can reach a second one.
     """
-    names: set[str] = set()
-    if config.global_root.is_dir():
-        names = {
-            entry.name
-            for entry in config.global_root.iterdir()
-            if entry.is_dir() and user_id_error(entry.name) is None
-        }
-    if "default" not in names:
-        names.add("default")
-    return sorted(names, key=lambda name: (name != "default", name))
-
-
-def global_user_id(scope: str) -> str:
-    """Return the user a global scope names, refusing one that could escape.
-
-    A scope arrives from the browser, so the identifier is checked here before it
-    becomes a directory name, exactly as it is checked for the tools.
-    """
-    if not scope.startswith(GLOBAL_SCOPE_PREFIX):
+    if scope != GLOBAL_SCOPE:
         raise UIRequestError(
             f"Unknown memory scope: {scope or '(missing)'}", status_code=404
         )
-    user_id = scope[len(GLOBAL_SCOPE_PREFIX) :].strip()
-    problem = user_id_error(user_id)
-    if problem is not None:
-        raise UIRequestError(problem)
-    return str(user_id or "default")
+    return GLOBAL_SCOPE
 
 
 class MemoryToolClient(Protocol):
@@ -218,7 +196,7 @@ class MemoryUIAdapter:
         return {
             "project_root": str(self.config.project_root),
             "local_memory": str(self.config.local_directory),
-            "global_memory_root": str(self.config.global_root),
+            "global_directory": str(self.config.global_directory),
         }
 
     async def call(
@@ -254,9 +232,16 @@ class MemoryUIAdapter:
         return self.directory_for(scope.strip())
 
     def directory_for(self, scope: str) -> Path:
+        """Return the directory a scope names, refusing any other scope.
+
+        A scope arrives from the browser, so the one global scope is checked
+        rather than assumed: with no per-user directories, a fallback would
+        quietly hand the global memory to anything that asked.
+        """
         if scope == LOCAL_SCOPE:
             return self.config.local_directory
-        return self.config.global_root / global_user_id(scope)
+        require_global_scope(scope)
+        return self.config.global_directory
 
     def scopes(self) -> list[dict[str, Any]]:
         """Describe every scope this server can show, local memory first."""
@@ -267,14 +252,13 @@ class MemoryUIAdapter:
                 "directory": self.config.local_directory,
             }
         ]
-        described += [
+        described.append(
             {
-                "scope": f"{GLOBAL_SCOPE_PREFIX}{user_id}",
-                "label": f"Global · {user_id}",
-                "directory": self.config.global_root / user_id,
+                "scope": GLOBAL_SCOPE,
+                "label": "Global",
+                "directory": self.config.global_directory,
             }
-            for user_id in global_scopes(self.config)
-        ]
+        )
         for entry in described:
             directory = entry["directory"]
             entry["directory"] = str(directory)
@@ -563,7 +547,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     print(
-        f"{UI_NAME}: serving {config.local_directory} and {config.global_root} at "
+        f"{UI_NAME}: serving {config.local_directory} and {config.global_directory} at "
         f"http://{arguments.host}:{arguments.port}",
         file=sys.stderr,
     )

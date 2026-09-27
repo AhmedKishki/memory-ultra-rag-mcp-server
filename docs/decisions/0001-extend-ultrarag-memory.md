@@ -21,7 +21,9 @@ The UltraRAG UI already reads the `memory/` directory of its own storage tree. W
 
 **2. The extension is a second, project-scoped memory.** A project's memory lives inside that repository, under `.memory-rag`, in upstream's format. One server instance serves one project and binds it at startup, so a project's memory is private to it and travels with it.
 
-**3. Global memory is where durable, cross-project rules live.** The user is the unit, not the project: who they are, what they want remembered everywhere, and the standing instructions that apply wherever they work. A rule belongs in a user's standing document, not in a project's, and not in a dated round.
+**3. Global memory is where durable, cross-project rules live.** The account is the unit, not the project: who the user is, what they want remembered everywhere, and the standing instructions that apply wherever they work. A rule belongs in the global standing document, not in a project's, and not in a dated round.
+
+**3a. There is no user dimension on the global tools.** Upstream keys its memory by `user_id`; this server does not, and neither the tools nor the page takes one. A project is identified by the repository the server is bound to, so a user identifier would be a second identity for something already identified, and an agent would have to decide which user it is before it could remember anything. The global memory is one per account, and it lives in the directory upstream uses for the user it is given when none is named — `memory/default/` — so the layout stays upstream's, an existing store keeps working, and a UltraRAG UI still reads it. The tools are four; the page shows two blocks, this project and global.
 
 **4. The agent is told which kind to use, and is given four names to choose from.** `get_memory_local` / `set_memory_local` and `get_memory_global` / `set_memory_global`: two verbs, two scopes, and the scope in the name, so the only decision is whether a memory is this project's or this user's. Read global memory at the start of a conversation and project memory when working inside the project, and act on what they say. A statement about the user, or an instruction they gave once, is global; a statement about this project is local.
 
@@ -51,6 +53,7 @@ The UltraRAG UI already reads the `memory/` directory of its own storage tree. W
 - The index is disposable and the files are not. A memory can be edited, committed, or read by a UltraRAG UI exactly as before this package existed, and the index is rebuilt from those files whenever they change.
 - Depending on no UltraRAG code means a format change upstream is this project's problem to notice. The pinned revision, the captured fixtures, and the differential workflow are the notice.
 - Depending on FTS5 means a platform requirement, and it is the one requirement this package adds that upstream's memory does not have. It is probed once, loudly, and recorded in `scripts/check_sqlite_fts5.py`.
+- Serving one global memory per account rather than one per user means two people sharing an account and a storage root share this memory too. That is the same bargain upstream's default user already makes, and the differential test records that upstream still keys and still validates by user while these tools do neither.
 
 ## What this server deliberately does not do
 

@@ -49,7 +49,6 @@ from .store import (
     daily_rounds,
     read_standing,
     standing_document,
-    user_id_error,
 )
 
 __all__ = ["SERVER_NAME", "create_server", "main"]
@@ -65,15 +64,6 @@ UI_PORT_ENV_VAR = "MEMORY_ULTRARAG_UI_PORT"
 DEFAULT_RESULT_LIMIT = 10
 MAX_RESULT_LIMIT = 50
 
-UserIdParameter = Annotated[
-    str,
-    Field(
-        description=(
-            "Whose global memory is used, so two users keep two memories. "
-            "Letters, digits, '_' and '-' only; 'default' when no user is named."
-        )
-    ),
-]
 ContentParameter = Annotated[
     str,
     Field(
@@ -112,15 +102,6 @@ READ_ONLY_ANNOTATIONS = ToolAnnotations(
 WRITE_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
 )
-
-
-def _global_directory(config: ServerConfig, user_id: str) -> Path:
-    """Return one user's global memory directory, or refuse the identifier."""
-    problem = user_id_error(user_id)
-    if problem is not None:
-        raise ToolError(problem)
-    normalized = str(user_id or "default").strip() or "default"
-    return config.global_root / normalized
 
 
 def create_server(
@@ -167,19 +148,16 @@ def create_server(
     )
 
     @server.tool(name="set_memory_global", annotations=WRITE_ANNOTATIONS)
-    def set_memory_global(
-        content: ContentParameter,
-        user_id: UserIdParameter = "default",
-    ) -> dict[str, Any]:
-        """Remember one statement for this user, everywhere they work.
+    def set_memory_global(content: ContentParameter) -> dict[str, Any]:
+        """Remember one statement that applies everywhere this account works.
 
         Use it for what is true of the user, and for a standing instruction they
         gave: those belong in every project, so they go here and nowhere else. The
-        statement is appended to that user's standing document in their global
-        memory, which every read returns and which the user and the browser view
-        can edit.
+        statement is appended to the standing document in global memory, which the
+        user and the browser view can edit. There is one global memory, so there is
+        nothing to name and nothing to choose.
         """
-        directory = _global_directory(config, user_id)
+        directory = config.global_directory
         try:
             digest = append_statement(directory, content)
         except StoreError as error:
@@ -204,17 +182,15 @@ def create_server(
     @server.tool(name="get_memory_global", annotations=READ_ONLY_ANNOTATIONS)
     def get_memory_global(
         query: QueryParameter,
-        user_id: UserIdParameter = "default",
         limit: LimitParameter = DEFAULT_RESULT_LIMIT,
     ) -> dict[str, Any]:
-        """Recall what this user wants remembered, everywhere they work.
+        """Recall what applies everywhere this account works.
 
-        Answer it from the user's standing document, which is returned whole
-        because it is small and curated, plus the dated rounds that match the
-        query, newest first. A user_id is optional and defaults to "default".
+        Answer it from the global memory's standing document and the dated rounds
+        that match the query. This is the account's one global memory, shared by
+        every project on this storage root.
         """
-        directory = _global_directory(config, user_id)
-        return _recalled("global", directory, query, limit)
+        return _recalled("global", config.global_directory, query, limit)
 
     @server.tool(name="get_memory_local", annotations=READ_ONLY_ANNOTATIONS)
     def get_memory_local(

@@ -40,7 +40,6 @@ __all__ = [
     "read_standing",
     "standing_digest",
     "standing_document",
-    "user_id_error",
     "write_standing",
 ]
 
@@ -49,8 +48,6 @@ TEMPLATE = "# MEMORY\ni am jack. i like LLMs.\n"
 
 STANDING_FILENAME = "MEMORY.md"
 ROUNDS_DIRNAME = "project"
-
-USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 #: The round heading upstream writes, which is also how a round is recognized.
 ROUND_HEADING_PATTERN = re.compile(r"^## (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$")
@@ -66,19 +63,6 @@ EMPTY_MESSAGE_ERRORS = (
 
 class StoreError(ValueError):
     """Raised when a scope or a round cannot be written as upstream writes it."""
-
-
-def user_id_error(user_id: str) -> str | None:
-    """Return upstream's error text for an unusable ``user_id``, else None.
-
-    Upstream accepts letters, digits, ``_`` and ``-``; the same shape is also what
-    keeps a scope inside the storage tree, since the identifier is a directory
-    name.
-    """
-    normalized = str(user_id or "default").strip() or "default"
-    if not USER_ID_PATTERN.fullmatch(normalized):
-        return "Invalid user_id format. Only letters, numbers, '_' and '-' are allowed."
-    return None
 
 
 def standing_document(scope_directory: Path) -> Path:
