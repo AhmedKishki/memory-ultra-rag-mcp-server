@@ -55,28 +55,29 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
 
     async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
         async with Client(_transport(thesis, storage)) as client:
-            saved = _data(
+            recorded = _data(
                 await client.call_tool(
-                    "save_local_memory",
-                    {"q_ls": ["Thesis question"], "ans_ls": ["Thesis answer"]},
+                    "set_memory_local", {"content": "The thesis lives in drafts/"}
                 )
             )
         async with Client(_transport(notes, storage)) as client:
-            other = _data(await client.call_tool("get_local_memory", {}))
-            return saved, other
+            other = _data(
+                await client.call_tool("get_memory_local", {"query": "thesis"})
+            )
+            return recorded, other
 
-    saved, other = asyncio.run(scenario())
-    assert saved["directory"] == str(thesis / ".memory-rag")
+    recorded, other = asyncio.run(scenario())
+    assert recorded["directory"] == str(thesis / ".memory-rag")
 
-    # The round is inside the thesis repository, not in the shared tree.
-    rounds = sorted((thesis / ".memory-rag" / "project").glob("*.md"))
-    assert len(rounds) == 1
-    assert "Thesis question" in rounds[0].read_text(encoding="utf-8")
+    # The statement is inside the thesis repository, not in the shared tree.
+    standing = (thesis / ".memory-rag" / "MEMORY.md").read_text(encoding="utf-8")
+    assert "The thesis lives in drafts/" in standing
     assert not (storage / "memory" / "local-thesis").exists()
 
     # The other project reads its own memory, which says nothing about the thesis.
-    assert other["directory"] == str(notes / ".memory-rag")
-    assert "Thesis question" not in other["local_memory_content"]
+    assert other["searched"]["directory"] == str(notes / ".memory-rag")
+    assert "The thesis lives in drafts/" not in other["standing_content"]
+    assert other["matched"] == 0
 
 
 def test_both_projects_share_the_global_memory(
@@ -86,22 +87,23 @@ def test_both_projects_share_the_global_memory(
     thesis.mkdir()
     notes.mkdir()
 
-    async def scenario() -> tuple[str, str]:
+    async def scenario() -> tuple[dict[str, Any], str]:
         async with Client(_transport(thesis, storage)) as client:
             await client.call_tool(
-                "save_memory",
-                {"user_id": "ahmed", "q_ls": ["Global fact"], "ans_ls": ["Noted."]},
+                "set_memory_global",
+                {"user_id": "ahmed", "content": "Prefer British English"},
             )
         async with Client(_transport(notes, storage)) as client:
             read = _data(
-                await client.call_tool("get_global_memory", {"user_id": "ahmed"})
+                await client.call_tool(
+                    "get_memory_global", {"user_id": "ahmed", "query": "English"}
+                )
             )
-            return read["current_user_id"], read["global_memory_content"]
+            return read, read["searched"]["directory"]
 
-    user_id, content = asyncio.run(scenario())
-    assert user_id == "ahmed"
-    global_rounds = sorted((storage / "memory" / "ahmed" / "project").glob("*.md"))
-    assert len(global_rounds) == 1
-    assert "Global fact" in global_rounds[0].read_text(encoding="utf-8")
+    read, directory = asyncio.run(scenario())
+    assert directory == str(storage / "memory" / "ahmed")
+    assert "Prefer British English" in read["standing_content"]
+    assert read["scope"] == "global"
     # The second project's server read the same global tree.
-    assert "MEMORY" in content
+    assert "MEMORY" in read["standing_content"]

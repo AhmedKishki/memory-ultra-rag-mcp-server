@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memory-ultra-rag-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Serve UltraRAG's memory over stdio MCP: a project's own memory inside the repository, and the shared global memory"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"

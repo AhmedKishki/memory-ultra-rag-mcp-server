@@ -9,8 +9,12 @@ where they live and therefore who can see them.
 * **local memory** belongs to the project this server is bound to and lives inside
   that repository, under ``.memory-rag``, so it travels with the project.
 
-The agent chooses which one a write goes to; the two tools of each kind take the
-same arguments, and the project is bound at startup rather than named per call.
+The surface is four tools, named by what they do and which kind they touch, so the
+only decision an agent makes is whether a memory is this project's or this user's.
+No tool returns a whole memory: a read takes a query, answers it from the standing
+document and the dated rounds, and reports what it searched, because a memory that
+grows by appending cannot be handed to a model whole without spending the context
+window on it.
 """
 
 from __future__ import annotations
@@ -39,11 +43,15 @@ from .config import (
 )
 from .instructions import SERVER_INSTRUCTIONS
 from .store import (
+    STANDING_READ_LINE_LIMIT,
     StoreError,
-    append_round,
+    append_statement,
     daily_rounds,
+    query_terms,
     read_standing,
+    search_entries,
     standing_document,
+    standing_matching_lines,
     user_id_error,
 )
 
@@ -54,6 +62,12 @@ SERVER_NAME = "memory-ultra-rag-mcp"
 #: The environment variable that turns the browser view on for every start.
 UI_PORT_ENV_VAR = "MEMORY_ULTRARAG_UI_PORT"
 
+#: How many dated rounds one read may return. A memory grows by appending, so a read
+#: is capped and says so; the cap is a parameter so a caller that needs more can
+#: ask for more deliberately.
+DEFAULT_RESULT_LIMIT = 10
+MAX_RESULT_LIMIT = 50
+
 UserIdParameter = Annotated[
     str,
     Field(
@@ -63,14 +77,34 @@ UserIdParameter = Annotated[
         )
     ),
 ]
-QuestionListParameter = Annotated[
-    list[str],
-    Field(description="The user's message for this round, as a single-element list."),
-]
-AnswerListParameter = Annotated[
-    list[str],
+ContentParameter = Annotated[
+    str,
     Field(
-        description="The assistant's reply for this round, as a single-element list."
+        description=(
+            "The one statement to remember, in the user's own words where it is "
+            "theirs. Plain text: a line or a short paragraph, not a question and "
+            "an answer."
+        )
+    ),
+]
+QueryParameter = Annotated[
+    str,
+    Field(
+        description=(
+            "What to recall, as words. The standing document and the dated rounds "
+            "are searched for these words, and the rounds that match come back "
+            "newest first. Required: this server answers a question rather than "
+            "returning a memory whole."
+        )
+    ),
+]
+LimitParameter = Annotated[
+    int,
+    Field(
+        description=(
+            "How many dated rounds to return, at most "
+            f"{MAX_RESULT_LIMIT}. The standing document is always returned."
+        )
     ),
 ]
 
@@ -134,81 +168,136 @@ def create_server(
         lifespan=lifespan,
     )
 
-    @server.tool(name="get_global_memory", annotations=READ_ONLY_ANNOTATIONS)
-    def get_global_memory(user_id: UserIdParameter = "default") -> dict[str, Any]:
-        """Read a user's global memory.
-
-        Global memory holds what a user wants remembered everywhere, and every
-        instance pointed at the same storage root reads it. The read returns the
-        whole standing document and creates it from UltraRAG's template the first
-        time that user's memory is read.
-        """
-        directory = _global_directory(config, user_id)
-        return {
-            "global_memory_content": read_standing(directory),
-            "current_user_id": directory.name,
-        }
-
-    @server.tool(name="save_memory", annotations=WRITE_ANNOTATIONS)
-    def save_memory(
-        user_id: UserIdParameter,
-        q_ls: QuestionListParameter,
-        ans_ls: AnswerListParameter,
+    @server.tool(name="set_memory_global", annotations=WRITE_ANNOTATIONS)
+    def set_memory_global(
+        content: ContentParameter,
+        user_id: UserIdParameter = "default",
     ) -> dict[str, Any]:
-        """Append one round to a user's global memory.
+        """Remember one statement for this user, everywhere they work.
 
-        The round is written to that user's daily file with UltraRAG's own format:
-        a dated heading, the user's line, and the assistant's line.
+        Use it for what is true of the user, and for a standing instruction they
+        gave: those belong in every project, so they go here and nowhere else. The
+        statement is appended to that user's standing document in their global
+        memory, which every read returns and which the user and the browser view
+        can edit.
         """
         directory = _global_directory(config, user_id)
         try:
-            written = append_round(directory, q_ls, ans_ls)
+            digest = append_statement(directory, content)
         except StoreError as error:
             raise ToolError(str(error)) from error
-        return _saved(directory, written)
+        return _recorded(directory, digest)
 
-    @server.tool(name="get_local_memory", annotations=READ_ONLY_ANNOTATIONS)
-    def get_local_memory() -> dict[str, Any]:
-        """Read this project's local memory.
+    @server.tool(name="set_memory_local", annotations=WRITE_ANNOTATIONS)
+    def set_memory_local(content: ContentParameter) -> dict[str, Any]:
+        """Remember one statement for this project only.
 
-        Local memory belongs to the repository this server is bound to and lives
-        inside it, under `.memory-rag`, so it stays with the project and no other
-        project reads it. The read returns the whole standing document and creates
-        it from UltraRAG's template the first time the project's memory is read.
-        """
-        return {
-            "local_memory_content": read_standing(config.local_directory),
-            "directory": str(config.local_directory),
-        }
-
-    @server.tool(name="save_local_memory", annotations=WRITE_ANNOTATIONS)
-    def save_local_memory(
-        q_ls: QuestionListParameter,
-        ans_ls: AnswerListParameter,
-    ) -> dict[str, Any]:
-        """Append one round to this project's local memory.
-
-        The round is written inside the project with UltraRAG's own format, so a
-        project's memory has the same shape as a user's global memory and can be
-        read from the project directory alone.
+        Use it for what is true here — a decision, a path, a convention, where
+        something lives — and not for anything the user said applies everywhere.
+        The statement is appended to this project's standing document, inside the
+        repository under `.memory-rag`, so it travels with the project.
         """
         try:
-            written = append_round(config.local_directory, q_ls, ans_ls)
+            digest = append_statement(config.local_directory, content)
         except StoreError as error:
             raise ToolError(str(error)) from error
-        return _saved(config.local_directory, written)
+        return _recorded(config.local_directory, digest)
+
+    @server.tool(name="get_memory_global", annotations=READ_ONLY_ANNOTATIONS)
+    def get_memory_global(
+        query: QueryParameter,
+        user_id: UserIdParameter = "default",
+        limit: LimitParameter = DEFAULT_RESULT_LIMIT,
+    ) -> dict[str, Any]:
+        """Recall what this user wants remembered, everywhere they work.
+
+        Answer it from the user's standing document, which is returned whole
+        because it is small and curated, plus the dated rounds that match the
+        query, newest first. A user_id is optional and defaults to "default".
+        """
+        directory = _global_directory(config, user_id)
+        return _recalled("global", directory, query, limit)
+
+    @server.tool(name="get_memory_local", annotations=READ_ONLY_ANNOTATIONS)
+    def get_memory_local(
+        query: QueryParameter,
+        limit: LimitParameter = DEFAULT_RESULT_LIMIT,
+    ) -> dict[str, Any]:
+        """Recall what is true about this project.
+
+        Answer it from this project's standing document, which is returned whole
+        because it is small and curated, plus the dated rounds that match the
+        query, newest first. Nothing outside this repository is read, and no other
+        project's memory is reachable from here.
+        """
+        return _recalled("local", config.local_directory, query, limit)
 
     return server
 
 
-def _saved(scope_directory: Path, written: Path) -> dict[str, Any]:
-    """Describe one appended round the same way for both kinds of memory."""
+def _bounded_standing(text: str) -> tuple[str, bool]:
+    """Return at most the first ``STANDING_READ_LINE_LIMIT`` lines of a document."""
+
+    lines = text.splitlines()
+    if len(lines) <= STANDING_READ_LINE_LIMIT:
+        return text, False
+    return "\n".join(lines[:STANDING_READ_LINE_LIMIT]), True
+
+
+def _recalled(
+    scope: str,
+    directory: Path,
+    query: str,
+    limit: int,
+) -> dict[str, Any]:
+    """Answer one read from a scope, and report what was searched.
+
+    The standing document is returned whole and bounded, because it is the curated
+    part of the memory and the rules live in it. The dated rounds are the part that
+    grows without limit, so only the ones the query matches are returned, capped,
+    with the number that matched behind them and the number that was read.
+    """
+
+    if not str(query or "").strip():
+        raise ToolError(
+            "query must not be empty: this server answers a question about a "
+            "memory rather than returning one whole, because a memory grows by "
+            "appending and reading it all would spend the context window on it"
+        )
+    capped = max(1, min(int(limit), MAX_RESULT_LIMIT))
+    terms = query_terms(query)
+
+    standing = read_standing(directory)
+    standing_content, standing_truncated = _bounded_standing(standing)
+    entries, matched, rounds_read, files_read = search_entries(directory, terms, capped)
     return {
-        "status": "saved",
+        "scope": scope,
+        "query": str(query),
+        "search_terms": list(terms),
+        "standing_content": standing_content,
+        "standing_truncated": standing_truncated,
+        "standing_lines_matched": standing_matching_lines(standing_content, terms),
+        "entries": entries,
+        "matched": matched,
+        "returned": len(entries),
+        "truncated": matched > len(entries) or standing_truncated,
+        "searched": {
+            "directory": str(directory),
+            "files": files_read,
+            "rounds": rounds_read,
+            "rounds_directory": str(daily_rounds(directory)),
+        },
+    }
+
+
+def _recorded(scope_directory: Path, digest: str) -> dict[str, Any]:
+    """Describe one recorded statement the same way for both kinds of memory."""
+    return {
+        "status": "set",
         "directory": str(scope_directory),
         "standing_document": str(standing_document(scope_directory)),
+        "sha256": digest,
         "rounds_directory": str(daily_rounds(scope_directory)),
-        "written": str(written),
     }
 
 

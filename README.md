@@ -55,12 +55,23 @@ One server instance serves one project, so `--project-root` binds the session: l
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `get_local_memory` | — | Returns the project's standing memory, the whole `MEMORY.md`, and creates it from UltraRAG's template the first time it is read. |
-| `save_local_memory` | `q_ls`, `ans_ls` | Appends one round to the project's daily file. |
-| `get_global_memory` | `user_id="default"` | Returns that user's standing memory, and creates it from UltraRAG's template the first time it is read. |
-| `save_memory` | `user_id`, `q_ls`, `ans_ls` | Appends one round to that user's daily file. |
+| `get_memory_local` | `query`, `limit=10` | Answers a question from this project's memory. |
+| `set_memory_local` | `content` | Records one statement in this project's standing memory. |
+| `get_memory_global` | `query`, `user_id="default"`, `limit=10` | Answers a question from that user's memory. |
+| `set_memory_global` | `content`, `user_id="default"` | Records one statement in that user's standing memory. |
 
-`q_ls` and `ans_ls` are single-element lists — the user's message and the reply — in the shape UltraRAG's own tool takes. A `user_id` holds letters, digits, `_` and `-`, which is both upstream's rule and what keeps a user's memory to one directory.
+Two verbs, two scopes, and the scope in the name, so the only decision an agent makes is whether a memory is this project's or this user's. A `user_id` holds letters, digits, `_` and `-`, which is both upstream's rule and what keeps a user's memory to one directory.
+
+**A read takes a query, and never returns a memory whole.** These memories grow by appending, so handing one to a model whole would spend the context window on the file instead of on the work. A read searches the standing document and the dated rounds for the query's words and answers with:
+
+- the standing document, whole and bounded, because it is the small curated part and the rules live in it;
+- the lines of it the query matched, so the agent can see why without a second copy of the file;
+- up to `limit` dated rounds that matched, ranked by the longest word they share with the query, then by how many, then newest first;
+- how many rounds matched in total, how many were returned, whether anything was left out, and what was searched.
+
+Matching is a substring test over the files themselves: no index, no model, and nothing outside the scope being read. An empty query is refused rather than answered with everything.
+
+**A write records one statement.** `set_*` appends the statement to the standing document as plain text, with no speaker attached to it: it is what you chose to remember, not something the user said and not something an assistant replied. The dated dialogue files stay the exchange history, and the browser view is what writes them.
 
 ## Browser view
 
@@ -93,7 +104,16 @@ The view shows the bound project's memory and every user's global memory **toget
 <storage-root>/memory/<user_id>/project/<date>.md     that user's rounds, by day
 ```
 
-A round is written in UltraRAG's format:
+A standing document holds statements, one block per write, after the template UltraRAG seeds it with:
+
+```markdown
+# MEMORY
+i am jack. i like LLMs.
+
+The draft lives in docs/
+```
+
+A round is written in UltraRAG's format, by the browser view, and is the exchange history:
 
 ```markdown
 # Project Memory 2026-09-22
@@ -118,12 +138,12 @@ A project's memory is ordinary Markdown in that project: visible, diffable, and 
 
 Recorded so an absence reads as a decision rather than an oversight, and so a later change extends this server instead of replacing what it stands on. [ADR 0001](docs/decisions/0001-extend-ultrarag-memory.md) carries the reasoning.
 
-- **No search.** Both reads return a whole standing document; nothing finds a statement inside it.
-- **No partial reads.** No limit, offset, or date range.
-- **No editing or removing a round.** A round is appended, never corrected or withdrawn through a tool. The standing document is replaced only through the browser view or by hand.
-- **No way to write a standing document from MCP.** So an agent asked to remember a rule reports where the rule belongs instead of writing it.
-- **No session tier.** Every round is durable; nothing expires.
+- **A read searches words, not meaning.** No synonyms, no stemming, no ranking beyond the longest shared word; a paraphrase is found only if the words are there. There is no model and no index.
+- **A read cannot be paged or offset.** `limit` caps the dated rounds; there is no "next page" and no date range.
+- **Nothing removes or corrects a statement.** A statement is appended; the standing document is replaced only through the browser view or by hand, and a dated round is never edited.
+- **No session tier.** Every statement is durable; nothing expires.
 - **No typed or relational structure.** The memory model is upstream's, deliberately.
+- **No cross-scope read.** One call reads one scope, so nothing can quietly sweep a project's memory into another's.
 
 ## The choices this package makes
 
@@ -132,13 +152,17 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 1 | Local memory is kept inside the project, under `.memory-rag` | isolation is the point: a project's memory is private to that project and travels with it |
 | 2 | The project is bound at startup, and the project tools take no project argument | one session means one project, so local memory cannot be written into the wrong one |
 | 3 | Global memory keeps UltraRAG's layout in the storage tree | the shared memory stays where a UltraRAG UI already reads it |
-| 4 | The behaviour, file names, and formats are UltraRAG's, and the two kinds share one implementation | a project's memory and a user's memory have one shape, so either can be read the same way |
-| 5 | The surface is the four memory tools, and this server is not a UltraRAG pipeline node | UltraRAG's server base class registers a pipeline `build` tool, and its runner wires servers through generated `server.yaml` files and `output=` annotations. Both belong to a pipeline deployment, so this package ships neither and depends on no UltraRAG code: memory here is a complete solution for a project and an account, served to agents and people directly, not a stage inside someone else's pipeline |
+| 4 | The file names and formats are UltraRAG's, and the two kinds share one implementation | a project's memory and a user's memory have one shape, so either can be read the same way, and a UltraRAG UI already reads the shared one |
+| 5 | The surface is four tools, and this server is not a UltraRAG pipeline node | UltraRAG's server base class registers a pipeline `build` tool, and its runner wires servers through generated `server.yaml` files and `output=` annotations. Both belong to a pipeline deployment, so this package ships neither and depends on no UltraRAG code: memory here is a complete solution for a project and an account, served to agents and people directly, not a stage inside someone else's pipeline |
 | 6 | The reference revision and its captured output are committed and tested | the format cannot drift quietly: a change fails `tests/test_fidelity.py` |
 | 7 | The browser view is the shared `ui-ultra-rag-mcp` package through a thin adapter, pinned by commit | interface code stays in one repository, and this package keeps no second UI |
 | 8 | The page reaches memory only through this server: no directory is handed to the browser | one reader and one writer per file, and the page shows what an agent reads |
 | 9 | Replacing the standing document is this package's own write, guarded by the digest the page read | upstream only creates that document from its template, and a plain overwrite could drop an agent's write |
 | 10 | Global memory defaults to this account's home data directory, and moves by flag or variable | it belongs to the user rather than to a project, and the default follows the sibling repositories' pattern: one flag, one variable, a place in the home directory |
+| 11 | The tool names are renamed to two verbs and two scopes, and upstream's names are not re-exposed | the agent's only decision should be which kind of memory it is, so the scope is in the name and there is nothing else to choose between |
+| 12 | A read takes a query and answers it, and no tool returns a memory whole | a memory grows by appending; reading it whole spends the context window on the file instead of on the work, and would be unusable after a few weeks |
+| 13 | Retrieval is a substring search over the scope's own files, with no index and no model | a grep is what these files support, it is explainable, and it keeps the no-model line that the rest of the design rests on |
+| 14 | A statement is appended to the standing document, and the dated files stay the exchange history | a statement is not an exchange, and attributing one to the user or to an assistant would put a claim in the file that nobody made |
 
 ## Develop and test
 
@@ -160,7 +184,7 @@ ULTRARAG_CHECKOUT=/ABSOLUTE/PATH/TO/UltraRAG uv run --frozen pytest -m upstream
 
 ## Credit and licensing
 
-The memory model, the tools `get_global_memory` and `save_memory`, the file names, and the file formats are UltraRAG's, from [`OpenBMB/UltraRAG`](https://github.com/OpenBMB/UltraRAG) at commit `3a709a2` (Apache-2.0). Credit belongs to the UltraRAG team and contributors, including participants from THUNLP, NEUIR, OpenBMB, and AI9stars.
+The memory model, the file names, and the file formats are UltraRAG's, from [`OpenBMB/UltraRAG`](https://github.com/OpenBMB/UltraRAG) at commit `3a709a2` (Apache-2.0), and the tools are its memory tools renamed and extended — see [ADR 0001](docs/decisions/0001-extend-ultrarag-memory.md). Credit belongs to the UltraRAG team and contributors, including participants from THUNLP, NEUIR, OpenBMB, and AI9stars.
 
 This package is licensed under the [Apache License 2.0](LICENSE). It is an independent project: not an official release of UltraRAG, not affiliated with or endorsed by its maintainers, and the UltraRAG name describes what it serves.
 

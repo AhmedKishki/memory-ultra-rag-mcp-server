@@ -51,6 +51,7 @@ from .config import (
 from .server import create_server
 from .store import (
     StoreError,
+    append_round,
     count_rounds,
     latest_round_date,
     list_rounds,
@@ -331,20 +332,19 @@ class MemoryUIAdapter:
     async def memory_append(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         scope = str(arguments.get("scope") or "").strip()
         directory = self.scope_directory(arguments)
-        payload: dict[str, Any] = {
-            "q_ls": [_required_text(arguments, "user_message")],
-            "ans_ls": [_required_text(arguments, "assistant_message")],
-        }
-        if scope == LOCAL_SCOPE:
-            tool = "save_local_memory"
-        else:
-            tool = "save_memory"
-            payload["user_id"] = global_user_id(scope)
-        saved = await self.call_tool(tool, payload)
+        # The page writes the exchange itself, through the same store the server
+        # reads and writes, so the daily file keeps one writer and one format. It
+        # does not go through a tool: the tools record statements, and an exchange
+        # is not a statement.
+        written = append_round(
+            directory,
+            [_required_text(arguments, "user_message")],
+            [_required_text(arguments, "assistant_message")],
+        )
         return {
             "status": "saved",
             "scope": scope,
-            "written": saved.get("written"),
+            "written": str(written),
             "round_count": count_rounds(directory),
         }
 

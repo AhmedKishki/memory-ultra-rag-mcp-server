@@ -25,6 +25,7 @@ from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
 from memory_ultra_rag_mcp.config import global_memory_root
+from memory_ultra_rag_mcp.store import append_round
 
 pytestmark = pytest.mark.upstream
 
@@ -98,8 +99,9 @@ def _our_transport(project: Path, storage: Path, workspace: Path) -> StdioTransp
     )
 
 
-async def _exercise(transport: StdioTransport) -> tuple[list[str], dict, dict]:
-    """Read and write one round through a transport, and report what happened."""
+async def _exercise_upstream(transport: StdioTransport) -> tuple[list[str], dict]:
+    """Read and write one exchange through upstream's own two tools."""
+
     async with Client(transport, init_timeout=120) as client:
         tools = sorted(tool.name for tool in await client.list_tools())
         read = _data(await client.call_tool("get_global_memory", {"user_id": USER_ID}))
@@ -108,7 +110,29 @@ async def _exercise(transport: StdioTransport) -> tuple[list[str], dict, dict]:
             {"user_id": USER_ID, "q_ls": [QUESTION], "ans_ls": [ANSWER]},
             raise_on_error=True,
         )
-    return tools, read, {}
+    return tools, read
+
+
+async def _exercise_ours(
+    transport: StdioTransport, storage: Path
+) -> tuple[list[str], dict]:
+    """Do the equivalent on this side: a bounded read, and one written exchange.
+
+    The agent-facing tools do not write exchanges any more — a statement goes to
+    the standing document — so the exchange is written through the same store
+    function the browser view uses, which is what keeps the daily file's format
+    upstream's.
+    """
+
+    async with Client(transport, init_timeout=120) as client:
+        tools = sorted(tool.name for tool in await client.list_tools())
+        read = _data(
+            await client.call_tool(
+                "get_memory_global", {"user_id": USER_ID, "query": "draft"}
+            )
+        )
+    append_round(global_memory_root(storage) / USER_ID, [QUESTION], [ANSWER])
+    return tools, read
 
 
 def _written(storage: Path) -> tuple[bytes, dict[str, bytes]]:
@@ -132,11 +156,13 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     our_workspace = tmp_path / "our-workspace"
     our_workspace.mkdir()
 
-    upstream_tools, upstream_read, _ = asyncio.run(
-        _exercise(_upstream_transport(upstream_storage, upstream_workspace))
+    upstream_tools, upstream_read = asyncio.run(
+        _exercise_upstream(_upstream_transport(upstream_storage, upstream_workspace))
     )
-    our_tools, our_read, _ = asyncio.run(
-        _exercise(_our_transport(our_project, our_storage, our_workspace))
+    our_tools, our_read = asyncio.run(
+        _exercise_ours(
+            _our_transport(our_project, our_storage, our_workspace), our_storage
+        )
     )
 
     # The store itself: same standing document, same round, same file names.
@@ -149,20 +175,31 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
         theirs = STAMP.sub("## <timestamp>", upstream_bytes.decode("utf-8"))
         assert ours == theirs
 
-    # The read: same keys, same content, same user id echoed back.
+    # The read: the same standing document comes back, by a deliberately different
+    # route. Upstream returns the whole file under one key; this side returns the
+    # document bounded, the rounds that matched a query, and what it searched.
     assert upstream_read == {
         "global_memory_content": upstream_standing.decode(),
         "current_user_id": USER_ID,
     }
-    assert our_read == upstream_read
+    assert our_read["standing_content"] == upstream_read["global_memory_content"]
+    assert our_read["scope"] == "global"
+    assert our_read["searched"]["directory"] == str(
+        global_memory_root(our_storage) / USER_ID
+    )
+    assert our_read["truncated"] is False
 
     # The surface: the differences this package chose, asserted rather than assumed.
     assert "build" in upstream_tools  # UltraRAG's pipeline tool, which we exclude
     assert "build" not in our_tools
-    assert {"get_global_memory", "save_memory"} <= set(our_tools)
     assert set(our_tools) == {
-        "get_global_memory",
-        "get_local_memory",
-        "save_local_memory",
-        "save_memory",
+        "get_memory_global",
+        "get_memory_local",
+        "set_memory_global",
+        "set_memory_local",
     }
+    # The two upstream memory tools are renamed, not re-exposed: an agent sees one
+    # verb per scope, and the scope is in the name (ADR 0001).
+    assert "get_global_memory" not in our_tools
+    assert "save_memory" not in our_tools
+    assert {"get_global_memory", "save_memory"} <= set(upstream_tools)
