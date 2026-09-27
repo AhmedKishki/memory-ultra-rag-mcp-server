@@ -88,10 +88,10 @@ QueryParameter = Annotated[
     str,
     Field(
         description=(
-            "What to recall, as words. The standing document and the dated rounds "
-            "are searched for these words, and the rounds that match come back "
-            "newest first. Required: this server answers a question rather than "
-            "returning a memory whole."
+            "What to recall, as words. The standing document's statements and the "
+            "dated rounds are searched for these words, and only what matched is "
+            "returned. Required: this server answers a question rather than "
+            "returning a memory whole, and no tool can return a file."
         )
     ),
 ]
@@ -99,8 +99,9 @@ LimitParameter = Annotated[
     int,
     Field(
         description=(
-            "How many dated rounds to return, at most "
-            f"{MAX_RESULT_LIMIT}. The standing document is always returned."
+            "How many matched statements and rounds to return, at most "
+            f"{MAX_RESULT_LIMIT}. Raising this raises the cap on matches, never "
+            "the amount of a file that is read."
         )
     ),
 ]
