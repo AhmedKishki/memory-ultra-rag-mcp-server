@@ -1,0 +1,70 @@
+name: Upstream differential
+
+# The guarantee this server is built on is that its memory is byte-compatible with
+# UltraRAG's own. `tests/test_fidelity.py` checks the format against captured
+# files; this workflow proves it against a real checkout, by starting upstream's
+# own memory server over stdio, giving it the same inputs, and comparing the bytes
+# both wrote. It is the assurance a wrapper would have had by construction if it
+# depended on upstream's code, which it deliberately does not (ADR 0001).
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+  schedule:
+    # Mondays, because the pin is a commit and upstream moves.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-differential-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  differential:
+    name: Differential · UltraRAG 3a709a2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.10"
+
+      - name: Frozen sync
+        run: uv sync --frozen
+
+      # The pin is the same commit `reference.py` names, so a pin change in the
+      # source shows up as a change to this file.
+      - name: Check out UltraRAG at the pinned revision
+        run: |
+          git init --quiet ultrarag
+          cd ultrarag
+          git remote add origin https://github.com/OpenBMB/UltraRAG.git
+          git fetch --depth 1 --quiet origin 3a709a2aea3fbe46acca59c422621c94b6e86857
+          git checkout --quiet FETCH_HEAD
+
+      # `tests/test_upstream_differential.py` looks for an interpreter at
+      # `<checkout>/.venv/bin/python`, so the environment is created inside the
+      # checkout rather than beside it.
+      - name: Build upstream's environment
+        run: |
+          uv venv --python 3.12 ultrarag/.venv
+          uv pip install --python ultrarag/.venv/bin/python ./ultrarag
+
+      - name: Compare against upstream
+        env:
+          ULTRARAG_CHECKOUT: ${{ github.workspace }}/ultrarag
+        run: uv run --frozen pytest -m upstream -v

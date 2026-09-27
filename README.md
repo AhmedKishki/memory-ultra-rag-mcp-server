@@ -3,11 +3,11 @@
 **Purpose:** serve UltraRAG's memory to an agent over stdio MCP, in two kinds:
 
 - **local memory** belongs to the project this server is bound to and lives inside that repository, under `.memory-rag`, so a project carries its memory with it and no other project reads it;
-- **global memory** belongs to a user and lives in UltraRAG's shared storage tree, so every instance serving that tree reads the same memory.
+- **global memory** belongs to a user and lives in UltraRAG's shared storage tree, so every instance serving that tree reads the same memory. It is the user's, not the project's: who they are, what they want remembered everywhere, and the **durable rules that apply wherever they work**.
 
-Both kinds work the same way: a standing document plus one dated dialogue file per day, written in UltraRAG's format. The agent chooses which kind a write goes to, and the two tools of each kind take the same arguments.
+Both kinds work the same way: a standing document plus one dated dialogue file per day, written in UltraRAG's format. The agent chooses which kind a write goes to, and the two tools of each kind take the same arguments. A standing instruction the user gave once belongs in global memory's standing document, where it is read at the start of every conversation, rather than in a dated round.
 
-The behaviour, the tool names, the file names, and the byte formats are UltraRAG's, taken from `servers/memory/src/memory.py` at the pinned revision below and checked against files that revision produced. The difference this package makes is where a project's memory lives: UltraRAG keeps everything under one storage tree, and this server keeps each project's memory inside the project.
+The behaviour, the tool names, the file names, and the byte formats are UltraRAG's, taken from `servers/memory/src/memory.py` at the pinned revision below and checked against files that revision produced. The difference this package makes is where a project's memory lives: UltraRAG keeps everything under one storage tree, and this server keeps each project's memory inside the project. What the extension is, and what it deliberately leaves alone, is decided in [ADR 0001](docs/decisions/0001-extend-ultrarag-memory.md).
 
 | Reference revision | Declared version |
 | --- | --- |
@@ -113,6 +113,17 @@ The storage root is where global memory lives, and its default is in the account
 Move it with `--storage-root`, or set `MEMORY_ULTRARAG_STORAGE_ROOT` once for every project this account opens. Set `ULTRARAG_UI_STORAGE_ROOT` instead and global memory lands in UltraRAG's own UI storage tree, under the `memory/` directory UltraRAG already reads — which is how a UltraRAG UI shows the same memory with no exchange format and no import step. The flag wins over the variables, and `MEMORY_ULTRARAG_STORAGE_ROOT` wins over `ULTRARAG_UI_STORAGE_ROOT`.
 
 A project's memory is ordinary Markdown in that project: visible, diffable, and optionally committed, by the project's own choice.
+
+## Not yet
+
+Recorded so an absence reads as a decision rather than an oversight, and so a later change extends this server instead of replacing what it stands on. [ADR 0001](docs/decisions/0001-extend-ultrarag-memory.md) carries the reasoning.
+
+- **No search.** Both reads return a whole standing document; nothing finds a statement inside it.
+- **No partial reads.** No limit, offset, or date range.
+- **No editing or removing a round.** A round is appended, never corrected or withdrawn through a tool. The standing document is replaced only through the browser view or by hand.
+- **No way to write a standing document from MCP.** So an agent asked to remember a rule reports where the rule belongs instead of writing it.
+- **No session tier.** Every round is durable; nothing expires.
+- **No typed or relational structure.** The memory model is upstream's, deliberately.
 
 ## The choices this package makes
 
