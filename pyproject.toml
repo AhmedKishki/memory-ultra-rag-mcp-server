@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memory-ultra-rag-mcp"
-version = "0.6.0"
+version = "0.7.0"
 description = "Serve UltraRAG's memory over stdio MCP: a project's own memory inside the repository, and the shared global memory"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -21,7 +21,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    # Local models, on CPU, run in process. The embedder is what makes a lookup
+    # work without assuming the caller's wording; numpy is the exact vector scan
+    # behind it, and is pinned explicitly rather than through onnxruntime.
+    "fastembed==0.8.0",
     "fastmcp==3.4.0",
+    "numpy>=1.26,<3",
     "platformdirs==4.11.10",
     # The shared browser view. Pinned by commit, as the sibling repositories do:
     # the UI is interface infrastructure with its own release history.
@@ -30,6 +35,7 @@ dependencies = [
 
 [project.scripts]
 memory-ultra-rag-mcp = "memory_ultra_rag_mcp.server:main"
+memory-ultra-rag-reindex = "memory_ultra_rag_mcp.reindex:main"
 memory-ultra-rag-ui = "memory_ultra_rag_mcp.ui:main"
 
 [project.urls]

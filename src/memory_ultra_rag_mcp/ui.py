@@ -48,6 +48,7 @@ from .config import (
     ServerConfig,
     resolve_config,
 )
+from .retrieval import Retrieval
 from .server import create_server
 from .store import (
     StoreError,
@@ -188,9 +189,19 @@ class MemoryUIAdapter:
     document has no tool, and is the one write this adapter performs itself.
     """
 
-    def __init__(self, config: ServerConfig, client: MemoryToolClient) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        client: MemoryToolClient,
+        retrieval: Retrieval | None = None,
+    ) -> None:
         self.config = config
         self.client = client
+        # The page and the tools share one retrieval, so a round the page records
+        # keeps the derived state in step exactly as a statement the tool records
+        # does. Without it a page write would be invisible to the semantic side
+        # until a reindex.
+        self.retrieval = retrieval
 
     async def health(self) -> Mapping[str, Any]:
         return {
@@ -325,11 +336,15 @@ class MemoryUIAdapter:
             [_required_text(arguments, "user_message")],
             [_required_text(arguments, "assistant_message")],
         )
+        queued = 0
+        if self.retrieval is not None:
+            queued = self.retrieval.maintain(directory, written)
         return {
             "status": "saved",
             "scope": scope,
             "written": str(written),
             "round_count": count_rounds(directory),
+            "units_queued": queued,
         }
 
     async def memory_standing_save(
@@ -369,7 +384,9 @@ class MemoryUIAdapter:
         return data
 
 
-def _adapter_factory(config: ServerConfig) -> AdapterFactory:
+def _adapter_factory(
+    config: ServerConfig, retrieval: Retrieval | None = None
+) -> AdapterFactory:
     """Build the adapter around this server's own tools, in this process.
 
     No child process is spawned: the memory tools are plain functions of this
@@ -378,8 +395,10 @@ def _adapter_factory(config: ServerConfig) -> AdapterFactory:
 
     @asynccontextmanager
     async def adapter_context() -> AsyncIterator[MemoryUIAdapter]:
-        async with Client(create_server(config), name=UI_NAME) as client:
-            yield MemoryUIAdapter(config, client)
+        async with Client(
+            create_server(config, retrieval=retrieval), name=UI_NAME
+        ) as client:
+            yield MemoryUIAdapter(config, client, retrieval)
 
     return adapter_context
 
@@ -388,6 +407,7 @@ def create_ui_app(
     config: ServerConfig,
     *,
     memory_client: MemoryToolClient | None = None,
+    retrieval: Retrieval | None = None,
 ) -> Starlette:
     """Create the shared UI with the memory adapter."""
     if memory_client is not None:
@@ -397,7 +417,7 @@ def create_ui_app(
         )
     return create_shared_ui_app(
         profile=MEMORY_UI_PROFILE,
-        adapter_factory=_adapter_factory(config),
+        adapter_factory=_adapter_factory(config, retrieval),
     )
 
 
@@ -424,10 +444,17 @@ class UIPort:
     start — goes to stderr, the only channel a stdio server may use.
     """
 
-    def __init__(self, config: ServerConfig, *, port: int) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        *,
+        port: int,
+        retrieval: Retrieval | None = None,
+    ) -> None:
         if not 1 <= port <= 65535:
             raise ConfigurationError("--ui-port must be between 1 and 65535")
         self.config = config
+        self.retrieval = retrieval
         self.host = UI_HOST
         self.port = port
         self.error: str | None = None
@@ -461,7 +488,9 @@ class UIPort:
                 "browser view was not started; choose another --ui-port"
             )
             return
-        app = create_ui_app(self.config, memory_client=memory_client)
+        app = create_ui_app(
+            self.config, memory_client=memory_client, retrieval=self.retrieval
+        )
         self._server = uvicorn.Server(
             uvicorn.Config(
                 app,

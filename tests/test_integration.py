@@ -27,11 +27,18 @@ def _data(result: Any) -> Any:
 
 
 def _transport(project: Path, storage: Path) -> StdioTransport:
+    """A real child process on a real pipe, with a model that costs nothing.
+
+    The transport is what these tests are about — a process, a pipe, the real
+    server object. The model is not: it would fetch 65 MB per run and put a
+    model's opinion inside an assertion about isolation.
+    """
+
+    runner = Path(__file__).resolve().parent / "serve_with_fake.py"
     return StdioTransport(
         command=sys.executable,
         args=[
-            "-m",
-            "memory_ultra_rag_mcp",
+            str(runner),
             "--project-root",
             str(project),
             "--storage-root",
@@ -75,9 +82,12 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
     assert not (storage / "memory" / "local-thesis").exists()
 
     # The other project reads its own memory, which says nothing about the thesis.
-    assert other["searched"]["directory"] == str(notes / ".memory-rag")
+    assert other["scope"] == "local"
     assert "The thesis lives in drafts/" not in json.dumps(other)
     assert other["units"] == []
+    assert not (notes / ".memory-rag" / "index-vectors.sqlite3").exists() or not any(
+        unit["source"].startswith("project/") for unit in other["units"]
+    )
 
 
 def test_both_projects_share_the_global_memory(
@@ -96,10 +106,11 @@ def test_both_projects_share_the_global_memory(
             read = _data(
                 await client.call_tool("get_memory_global", {"query": "English"})
             )
-            return read, read["searched"]["directory"]
+            return read, [unit["source"] for unit in read["units"]]
 
-    read, directory = asyncio.run(scenario())
-    assert directory == str(storage / "memory" / "default")
+    read, sources = asyncio.run(scenario())
+    # Both projects answered from the same file in the shared tree.
+    assert sources == ["MEMORY.md"]
     assert [unit["text"] for unit in read["units"]] == ["Prefer British English"]
     assert read["scope"] == "global"
     # The second project's server read the same global memory, which is the

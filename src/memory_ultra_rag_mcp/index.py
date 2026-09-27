@@ -33,11 +33,13 @@ from pathlib import Path
 from typing import Self
 
 from .store import (
+    TEMPLATE,
     StoreError,
     daily_rounds,
     query_terms,
     standing_document,
 )
+from .vectors import unit_key
 
 __all__ = [
     "INDEX_FILENAME",
@@ -46,13 +48,14 @@ __all__ = [
     "fts5_available",
     "index_path",
     "query_terms",
+    "unit_key",
 ]
 
 #: The derived index file inside a scope directory.
 INDEX_FILENAME = "index.sqlite3"
 
 #: Bumped when the schema changes, so an older index is rebuilt rather than read.
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 
@@ -113,7 +116,9 @@ def _statement_units(text: str, source: str) -> list[tuple[str, str, str, str]]:
     units: list[tuple[str, str, str, str]] = []
     for ordinal, block in enumerate(text.split("\n\n")):
         statement = block.strip()
-        if statement:
+        # The template upstream seeds a standing document with is a seed, not
+        # something anyone wrote, so it is not indexed and cannot answer a query.
+        if statement and statement != TEMPLATE.strip():
             units.append((statement, "statement", source, f"{ordinal}"))
     return units
 
@@ -166,7 +171,8 @@ class MemoryIndex:
     def _create_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS unit USING fts5("
-            "text, kind UNINDEXED, source UNINDEXED, stamp UNINDEXED)"
+            "text, unit_key UNINDEXED, kind UNINDEXED, source UNINDEXED, "
+            "stamp UNINDEXED)"
         )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS source("
@@ -185,7 +191,8 @@ class MemoryIndex:
             connection.execute("DELETE FROM meta")
             connection.execute(
                 "CREATE VIRTUAL TABLE unit USING fts5("
-                "text, kind UNINDEXED, source UNINDEXED, stamp UNINDEXED)"
+                "text, unit_key UNINDEXED, kind UNINDEXED, source UNINDEXED, "
+                "stamp UNINDEXED)"
             )
             connection.execute(
                 "CREATE TABLE source("
@@ -213,6 +220,88 @@ class MemoryIndex:
 
     # -- keeping the index in step with the files ---------------------------
 
+    def freshness(self) -> dict[str, int]:
+        """Report what would change if the index were brought up to date.
+
+        This is two ``stat`` calls — the standing document and the rounds
+        directory — so a read can say whether the index might be behind without
+        walking every file. It catches a file added or removed, and the standing
+        document edited; an in-place edit to an older dated file is not caught,
+        which is the cost of maintaining the index on the write side and what
+        ``reindex`` is for.
+        """
+
+        connection = self._open()
+        behind = 0
+        for path in self.sources():
+            row = connection.execute(
+                "SELECT size, mtime_ns FROM source WHERE path = ?",
+                (str(path.relative_to(self.scope_directory)),),
+            ).fetchone()
+            if row is None:
+                behind += 1
+                continue
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                behind += 1
+                continue
+            if int(row[0]) != stat.st_size or int(row[1]) != stat.st_mtime_ns:
+                behind += 1
+        return {"files_behind": behind}
+
+    def count_units(self) -> int:
+        """Return how many units this index holds, without materialising them.
+
+        A disclosure number, so it is two counts rather than a walk: the read
+        path must not pay per unit to say how many are waiting.
+        """
+
+        connection = self._open()
+        row = connection.execute("SELECT count(*) FROM unit").fetchone()
+        return int(row[0]) if row else 0
+
+    def unit_keys(self, source: str | None = None) -> set[str]:
+        """Return the identity of the units this index holds.
+
+        Narrowed to one file when the caller is the write path, which only wrote
+        one, so the work is proportional to that file rather than to the memory.
+        """
+
+        connection = self._open()
+        if source is None:
+            rows = connection.execute("SELECT unit_key FROM unit").fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT unit_key FROM unit WHERE source = ?", (source,)
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def units_by_key(self, keys: Iterable[str]) -> dict[str, dict[str, str]]:
+        """Return the units named by these keys, with the text each one holds."""
+
+        wanted = list(dict.fromkeys(keys))
+        if not wanted:
+            return {}
+        connection = self._open()
+        found: dict[str, dict[str, str]] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = connection.execute(
+                "SELECT unit_key, text, kind, source, stamp FROM unit "
+                f"WHERE unit_key IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for key, text_value, kind, source, stamp in rows:
+                found[str(key)] = {
+                    "text": str(text_value),
+                    "kind": str(kind),
+                    "source": str(source),
+                    "stamp": str(stamp),
+                }
+        return found
+
     def sources(self) -> list[Path]:
         """Return the files this scope is made of, in a stable order."""
 
@@ -223,7 +312,27 @@ class MemoryIndex:
         return [path for path in files if path.is_file()]
 
     def sync(self) -> dict[str, int]:
-        """Re-read whatever changed, and report what the index now holds.
+        """Re-read whatever changed across the scope, and report what is held.
+
+        This walks every file, so it belongs to maintenance rather than to a
+        read: the write path calls :meth:`sync_file` for the one file it wrote,
+        and only ``reindex`` walks the scope.
+        """
+
+        return self._sync(self.sources(), whole_scope=True)
+
+    def sync_file(self, path: Path) -> dict[str, int]:
+        """Re-read one file of this scope, and report what the index holds.
+
+        This is the write path's half of keeping the index in step, and its work
+        is proportional to one file: a statement lands in the standing document,
+        an exchange in one dated file. Neither touches the rest of the memory.
+        """
+
+        return self._sync([path], whole_scope=False)
+
+    def _sync(self, candidates: Sequence[Path], *, whole_scope: bool) -> dict[str, int]:
+        """Re-read whichever of these files changed, and report what is held.
 
         A file that only grew since it was last read is treated as an append: the
         part already indexed is left alone and only the new bytes are parsed. A
@@ -232,7 +341,7 @@ class MemoryIndex:
         """
 
         connection = self._open()
-        present = self.sources()
+        present = [path for path in candidates if path.is_file()]
         known = {
             str(row[0]): (int(row[1]), int(row[2]), str(row[3]))
             for row in connection.execute(
@@ -240,12 +349,14 @@ class MemoryIndex:
             ).fetchall()
         }
 
-        removed = [
-            name for name in known if not (self.scope_directory / name).is_file()
-        ]
-        for name in removed:
-            connection.execute("DELETE FROM unit WHERE source = ?", (name,))
-            connection.execute("DELETE FROM source WHERE path = ?", (name,))
+        if whole_scope:
+            # Only a whole-scope pass can notice a file that was removed; a
+            # one-file pass must not delete units it was not asked about.
+            wanted = {str(path.relative_to(self.scope_directory)) for path in present}
+            for name in known:
+                if name not in wanted and not (self.scope_directory / name).is_file():
+                    connection.execute("DELETE FROM unit WHERE source = ?", (name,))
+                    connection.execute("DELETE FROM source WHERE path = ?", (name,))
 
         indexed = 0
         for path in present:
@@ -266,8 +377,12 @@ class MemoryIndex:
                     name, path.read_text(encoding="utf-8"), appended=False
                 )
             connection.executemany(
-                "INSERT INTO unit(text, kind, source, stamp) VALUES (?, ?, ?, ?)",
-                [(text, kind, name, stamp) for text, kind, _source, stamp in units],
+                "INSERT INTO unit(text, unit_key, kind, source, stamp) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (text, unit_key(text), kind, name, stamp)
+                    for text, kind, _source, stamp in units
+                ],
             )
             connection.execute(
                 "INSERT OR REPLACE INTO source(path, size, mtime_ns, head) "
@@ -308,9 +423,14 @@ class MemoryIndex:
         an index answers without visiting the rest of the memory. When nothing
         holds every word, the rarer words are tried on their own, because an
         over-strict conjunction returning nothing is worse than a broader one.
+
+        This does **not** bring the index up to date. A search answers from what
+        the index holds, and keeping it current is the write side's job — the
+        tools, the page, and ``reindex`` — because a read may not walk the scope
+        to find out what changed. A caller that wants the current answer syncs
+        first; :meth:`freshness` is what a read uses to say when it might not be.
         """
 
-        self.sync()
         terms = [term for term in query_terms(query) if term]
         if not terms:
             return [], "no-terms"
@@ -337,8 +457,8 @@ class MemoryIndex:
 
         try:
             cursor = connection.execute(
-                "SELECT text, kind, source, stamp FROM unit WHERE unit MATCH ? "
-                "ORDER BY rank LIMIT ?",
+                "SELECT text, unit_key, kind, source, stamp FROM unit "
+                "WHERE unit MATCH ? ORDER BY rank LIMIT ?",
                 (expression, max(int(limit), 1) + 1),
             )
         except sqlite3.Error as error:
@@ -348,8 +468,14 @@ class MemoryIndex:
         found = cursor.fetchall()
         # One row past the limit is how the caller learns there was more.
         return [
-            {"text": text, "kind": kind, "source": source, "stamp": stamp}
-            for text, kind, source, stamp in found
+            {
+                "text": text,
+                "unit_key": key,
+                "kind": kind,
+                "source": source,
+                "stamp": stamp,
+            }
+            for text, key, kind, source, stamp in found
         ]
 
     def _rarest(

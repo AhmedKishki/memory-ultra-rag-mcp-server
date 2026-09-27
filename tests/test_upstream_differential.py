@@ -25,8 +25,8 @@ from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 
-from memory_ultra_rag_mcp.config import global_memory_root
-from memory_ultra_rag_mcp.store import append_round
+from memory_ultra_rag_mcp.config import global_memory_root, resolve_config
+from memory_ultra_rag_mcp.store import append_round, read_standing
 
 pytestmark = pytest.mark.upstream
 
@@ -37,6 +37,7 @@ pytestmark = pytest.mark.upstream
 #: takes a user_id, this server does not.
 USER_ID = "default"
 QUESTION = "Where does the draft live?"
+STATEMENT = "The draft lives in the project directory."
 ANSWER = "In the project directory."
 
 STAMP = re.compile(r"^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", re.MULTILINE)
@@ -152,20 +153,45 @@ async def _exercise_upstream(transport: StdioTransport) -> tuple[list[str], dict
 
 async def _exercise_ours(
     transport: StdioTransport, storage: Path
-) -> tuple[list[str], dict]:
-    """Do the equivalent on this side: a bounded read, and one written exchange.
+) -> tuple[list[str], dict, dict]:
+    """Do the equivalent on this side, and read back something real.
 
-    The agent-facing tools do not write exchanges any more — a statement goes to
-    the standing document — so the exchange is written through the same store
-    function the browser view uses, which is what keeps the daily file's format
-    upstream's.
+    A statement is recorded through the tool, and the exchange is written through
+    the same store function the browser view uses, which is what keeps the daily
+    file's format upstream's. The read then has content to answer with, so the
+    comparison is against a unit that exists rather than against a template.
     """
 
     async with Client(transport, init_timeout=120) as client:
         tools = sorted(tool.name for tool in await client.list_tools())
-        read = _data(await client.call_tool("get_memory_global", {"query": "MEMORY"}))
+        await client.call_tool(
+            "set_memory_global", {"content": STATEMENT}, raise_on_error=True
+        )
+        await client.call_tool(
+            "get_memory_global", {"query": STATEMENT}, raise_on_error=True
+        )
     append_round(global_memory_root(storage) / USER_ID, [QUESTION], [ANSWER])
-    return tools, read
+    async with Client(transport, init_timeout=120) as client:
+        read = _data(await client.call_tool("get_memory_global", {"query": STATEMENT}))
+        fresh = _data(await client.call_tool("get_memory_global", {"query": "MEMORY"}))
+    return tools, read, fresh
+
+
+def _fresh_storage(tmp_path: Path, name: str) -> Path:
+    """Return a storage root whose scope has been read once and never written.
+
+    This is what a first read does on both sides, and it is the only standing
+    document the two can be asked to agree on byte for byte: upstream has no tool
+    that records a statement, and this side does.
+    """
+
+    project = tmp_path / name / "project"
+    project.mkdir(parents=True)
+    storage = tmp_path / name / "storage"
+    read_standing(
+        resolve_config(project_root=project, storage_root=storage).global_directory
+    )
+    return storage
 
 
 def _written(storage: Path) -> tuple[bytes, dict[str, bytes]]:
@@ -192,16 +218,26 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     upstream_tools, upstream_read = asyncio.run(
         _exercise_upstream(_upstream_transport(upstream_storage, upstream_workspace))
     )
-    our_tools, our_read = asyncio.run(
+    our_tools, our_read, fresh = asyncio.run(
         _exercise_ours(
             _our_transport(our_project, our_storage, our_workspace), our_storage
         )
     )
 
-    # The store itself: same standing document, same round, same file names.
+    # A fresh scope, read but never written, holds upstream's bytes exactly:
+    # that is the create-on-read contract, and it is the only standing document
+    # the two sides can be asked to agree on, because upstream has no tool that
+    # records a statement and this side does.
+    fresh_upstream = _written(_fresh_storage(tmp_path, "fresh-upstream"))
+    fresh_ours = _written(_fresh_storage(tmp_path, "fresh-ours"))
+    assert fresh_ours == fresh_upstream
+
+    # The store itself: the same template, then this side's statement appended in
+    # that same format, and the same round, byte for byte.
     upstream_standing, upstream_rounds = _written(upstream_storage)
     our_standing, our_rounds = _written(our_storage)
-    assert our_standing == upstream_standing
+    assert our_standing.decode().startswith(upstream_standing.decode())
+    assert our_standing.decode().endswith(f"\n{STATEMENT}\n")
     assert sorted(our_rounds) == sorted(upstream_rounds)
     for name, upstream_bytes in upstream_rounds.items():
         ours = STAMP.sub("## <timestamp>", our_rounds[name].decode("utf-8"))
@@ -217,17 +253,16 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
         "current_user_id": USER_ID,
     }
     assert our_read["scope"] == "global"
-    assert our_read["matched_by"] == "all-words"
-    # A unit is the document's content without its trailing newline, which is
-    # what a statement is; the bytes on disk are compared above, unchanged.
-    assert [unit["text"] for unit in our_read["units"]] == [
-        upstream_standing.decode().strip()
-    ]
+    # A statement this side recorded comes back as the unit it is, from the same
+    # file upstream would have written it into.
+    assert [unit["text"] for unit in our_read["units"]] == [STATEMENT]
     assert our_read["units"][0]["source"] == "MEMORY.md"
-    assert our_read["searched"]["directory"] == str(
-        global_memory_root(our_storage) / USER_ID
-    )
     assert our_read["truncated"] is False
+    # The template upstream seeds a fresh standing document with is a seed, not
+    # something anyone wrote, so it is not indexed and cannot answer a query.
+    # Upstream returns it as the whole document; this side returns nothing for it.
+    assert STATEMENT in our_standing.decode()
+    assert fresh["units"] == []
 
     # The surface: the differences this package chose, asserted rather than assumed.
     assert "build" in upstream_tools  # UltraRAG's pipeline tool, which we exclude

@@ -38,19 +38,26 @@ How to use them:
    the project's memory when you are working inside it, then act on what they say.
 3. A read takes a query, and that is deliberate: these memories grow by appending,
    so they are answered rather than returned whole, to keep the context window for
-   the work instead of for the file. Ask for what you need in words. What comes
-   back is only the parts that matched — a statement, or an exchange — each with
+   the work instead of for the file. A read looks for the query's words *and* for
+   its meaning, so ordinary wording usually works and a paraphrase often does.
+   What comes back is only what matched — a statement, or an exchange — each with
    the file and date it came from. There is no way to read a whole memory, and
-   asking for more than `limit` will not produce one.
+   raising `limit` raises the cap on matches, never the amount of a file read.
 4. Read the answer before drawing a conclusion from it. `matched_by` says whether
-   every word of your query was found (`all-words`) or whether the search fell
-   back to the words that occur least (`rarest-words`), which is broader and may
-   include something merely adjacent. If `truncated` is set, narrow the query
-   rather than repeating a broad one. If nothing came back, that is what the
-   search found; try other words rather than concluding the memory is empty.
+   the answer came from words, from meaning, or from both, and `semantic_available`
+   says whether the meaning side was there at all — when it is false, only the
+   exact words would have found anything. If `truncated` is set, narrow the query
+   rather than repeating a broad one. If nothing came back, that is what the search
+   found; try other words, or the topic in other words, rather than concluding the
+   memory is empty. If `index_files_behind` is more than zero, a file was edited
+   outside these tools; a `memory-ultra-rag-reindex` run brings the search back in
+   step with it.
 5. Record one statement at a time, in the words it should be remembered in, and
    say which kind you wrote to. The project is the one this server was started
-   for, so no project argument is needed.
+   for, so no project argument is needed. A write is answered as soon as the
+   statement is safe in the file, and `units_queued` says how many statements are
+   still waiting to be embedded; a read taken immediately may not yet find a
+   statement by meaning, though it will by its words.
 6. What memory returns is the record of what was remembered, quote it as the user's
    own words, and let the user decide which write matters when two disagree.
 """

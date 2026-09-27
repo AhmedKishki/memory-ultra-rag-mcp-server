@@ -21,7 +21,11 @@ CPython 3.11 or 3.12, Linux, [`uv`](https://docs.astral.sh/uv/getting-started/in
 uv run --frozen python scripts/check_sqlite_fts5.py
 ```
 
-Without FTS5 the server refuses to start, because a read would have to pass over every file a memory holds, which is the cost the index exists to remove. No UltraRAG checkout is needed: the formats are verified against captured fixtures and, when a checkout is available, against the real server. The browser view is the shared [`ui-ultra-rag-mcp`](https://github.com/AhmedKishki/ui-ultra-rag-mcp) package, pinned by commit and installed with this one.
+Without FTS5 the server refuses to start, because a read would have to pass over every file a memory holds, which is the cost the index exists to remove.
+
+A lookup also runs a local sentence embedder on the CPU, so the first use fetches its weights once — about 65 MB — into this package's own cache under `~/.cache/memory-ultra-rag-mcp/models`, and never again. **No API is used at any point**: the model runs in this process, and a machine that cannot fetch it still starts, records statements, and answers in words, saying `semantic_available: false` in every read so a caller is never left guessing why an answer is thinner. Which model it is takes one line, in a documented table.
+
+No UltraRAG checkout is needed: the formats are verified against captured fixtures and, when a checkout is available, against the real server. The browser view is the shared [`ui-ultra-rag-mcp`](https://github.com/AhmedKishki/ui-ultra-rag-mcp) package, pinned by commit and installed with this one.
 
 ## Install
 
@@ -68,15 +72,17 @@ One server instance serves one project, so `--project-root` binds the session: l
 
 Two verbs, two scopes, and the scope in the name, so the only decision an agent makes is whether a memory is this project's or the account's. There is no `user_id`: **one server is bound to one project**, and that project reaches exactly two memories — its own, inside its repository, and the one global memory, which belongs to the account and is shared by every project on the same storage root.
 
-**A read takes a query, and returns only what matched.** These memories grow by appending, so handing one to a model whole would spend the context window on the file instead of on the work. A read searches the scope's files and answers with:
+**A read takes a query, and returns only what matched.** These memories grow by appending, so handing one to a model whole would spend the context window on the file instead of on the work. A read answers in two directions at once — the query's **words** against an FTS5 index of the scope's own files, and its **meaning** against the vector of every statement and round in the scope — fuses the two by weighted rank, and answers with:
 
-- the units that matched — a statement from the standing document, or a dated round — at most `limit` of them, ranked by the index;
-- how it matched: `all-words` when the query's words are all present, or `rarest-words` when nothing held all of them and the query fell back to the words that occur in the fewest units;
-- whether anything was left out, and where the index and the files are.
+- the units that matched, a statement or a dated round, at most `limit` of them, best first;
+- `matched_by` on the answer and on each unit: words, meaning, or both;
+- whether anything was left out, whether the meaning side was available at all, and how long the read took.
 
-Every unit names the file and stamp it came from, so a caller can go to the original. Nothing else is returned: no file, no document, no whole memory.
+Every unit names the file and stamp it came from, so a caller can go to the original. Nothing else is returned: no file, no document, no whole memory, and no way to ask for one.
 
-Matching runs over an FTS5 index — a SQLite index built from the memory's own files, beside them, named `index.sqlite3`. A read is a lookup and a page of rows rather than a pass over every dated file, so its cost does not grow with the memory; measured on this repository's corpus shape, a query costs the same over 50,000 rounds as over 1,000. The index is derived, not the record: the Markdown files are, they are what a person edits and what a UltraRAG UI reads, and the index is rebuilt from them whenever they change, including a hand edit. Deleting it costs one rebuild. The query is words, not meaning: a paraphrase is found only when the words are present.
+Two derived indexes sit beside the files and hold nothing the Markdown does not: `index.sqlite3` for words, rebuilt in seconds, and `index-vectors.sqlite3` for meaning, whose cost is one embedding per unit. A read costs the same whatever the memory holds — measured on this repository's corpus shape, a word query costs the same over 50,000 rounds as over 1,000, and a vector scan is arithmetic over a few megabytes. The record is still the Markdown, so either file can be deleted and rebuilt.
+
+The write side keeps both current: the tools, the browser view, and `memory-ultra-rag-reindex`. A read never walks the scope to discover a change; it spends two `stat` calls and reports `index_files_behind` when a file was edited in place, and that report is what the reindex command answers.
 
 **A write records one statement.** `set_*` appends the statement to the standing document as plain text, with no speaker attached to it: it is what you chose to remember, not something the user said and not something an assistant replied. The dated dialogue files stay the exchange history, and the browser view is what writes them.
 
@@ -107,10 +113,12 @@ The view shows the bound project's memory and the account's global memory **toge
 ```
 <project-root>/.memory-rag/MEMORY.md                  the project's standing memory
 <project-root>/.memory-rag/project/<date>.md          the project's rounds, by day
-<project-root>/.memory-rag/index.sqlite3              derived search index, disposable
+<project-root>/.memory-rag/index.sqlite3              derived word index, disposable in seconds
+<project-root>/.memory-rag/index-vectors.sqlite3        derived vector index, disposable in a re-embedding
 <storage-root>/memory/default/MEMORY.md            the account's global standing memory
 <storage-root>/memory/default/project/<date>.md      its rounds, by day
-<storage-root>/memory/default/index.sqlite3          derived search index, disposable
+<storage-root>/memory/default/index.sqlite3          derived word index, disposable in seconds
+<storage-root>/memory/default/index-vectors.sqlite3    derived vector index, disposable in a re-embedding
 ```
 
 The global memory lives in `memory/default/`: `memory` is UltraRAG's own directory name, and `default` is the user it names when none is given, which keeps the layout upstream's and keeps a UltraRAG UI able to read it. It is one memory, not one per user, and the tools take no identifier for it.
@@ -149,8 +157,10 @@ A project's memory is ordinary Markdown in that project: visible, diffable, and 
 
 Recorded so an absence reads as a decision rather than an oversight, and so a later change extends this server instead of replacing what it stands on. [ADR 0001](docs/decisions/0001-extend-ultrarag-memory.md) carries the reasoning.
 
-- **A read searches words, not meaning.** No synonyms, no stemming, no ranking beyond the longest shared word; a paraphrase is found only if the words are there. There is no model and no index.
-- **A read cannot be paged or offset.** `limit` caps the dated rounds; there is no "next page" and no date range.
+- **A read understands a query, it does not rewrite it.** No query expansion, no stemming, no synonym list, and no model asked to rephrase; a statement is found because its meaning is near the query's, which is close to but not the same as understanding the question.
+- **A read cannot be paged or offset.** `limit` caps the units; there is no "next page" and no date range.
+- **A hand edit is not noticed by a read.** The write side keeps the index current, so a file edited behind its back is reported by `index_files_behind` and picked up by `memory-ultra-rag-reindex` — traded deliberately for a read that never walks the scope.
+- **The semantic side is unmeasured here.** This release adds it; the measurement that decides which model, and whether it beats words on this data, is the next phase. Nothing in this package claims a gain it has not measured.
 - **Nothing removes or corrects a statement.** A statement is appended; the standing document is replaced only through the browser view or by hand, and a dated round is never edited.
 - **No session tier.** Every statement is durable; nothing expires.
 - **No typed or relational structure.** The memory model is upstream's, deliberately.
@@ -176,6 +186,10 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 14 | The index follows the files instead of leading them, and no write path updates it | a memory edited by hand or by a UltraRAG UI is read correctly, because a read compares each file against what was indexed and re-reads only what changed |
 | 15 | A statement is appended to the standing document, and the dated files stay the exchange history | a statement is not an exchange, and attributing one to the user or to an assistant would put a claim in the file that nobody made |
 | 16 | Global memory has no `user_id`: it is the account's one memory, in the directory upstream uses for the user it is given when none is named | a project is identified by the repository it is bound to, so a user dimension would be a second identity for something already identified; the directory is left as upstream's so the layout, an existing store, and a UltraRAG UI are unaffected |
+| 17 | A read works in words and in meaning, fused, with the model behind a seam | a memory is largely proper nouns, paths and identifiers, which the collection's own measurements say need words; a query that never used the caller's wording needs meaning |
+| 18 | The model is local, pinned, listed, and run on the CPU in this process | no API is used at this stage, the weights are fetched once into this package's own cache, and a stronger or multilingual model is one line rather than a rewrite |
+| 19 | Recording is asynchronous; a lookup is not | a write may cost an append and a queued unit and never fails because the lookup layer is missing; a read may only do constant work, so it never embeds units, walks the scope, or loads a model |
+| 20 | The write side keeps the index current, and `memory-ultra-rag-reindex` answers for a hand edit | sweeping every file on every read was measured at about 0.18 ms per source in the collection's other server, which is hundreds of milliseconds at a few thousand daily files |
 
 ## Develop and test
 

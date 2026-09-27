@@ -4,9 +4,9 @@ This project is licensed under the Apache License, Version 2.0. See LICENSE.
 
 ULTRARAG ATTRIBUTION
 
-Memory UltraRAG MCP serves UltraRAG's memory: one standing MEMORY.md per scope plus one dated dialogue file per day, with the tools get_global_memory, save_memory, get_local_memory, and save_local_memory.
+Memory UltraRAG MCP serves UltraRAG's memory: one standing MEMORY.md per scope plus one dated dialogue file per day, through the tools set_memory_local, set_memory_global, get_memory_local, and get_memory_global.
 
-The behaviour, the tool names and parameters, the file names, and the file formats are UltraRAG's, taken from the upstream repository at a pinned revision:
+The behaviour, the file names, and the file formats are UltraRAG's, taken from the upstream repository at a pinned revision. The tool names and the read payload are not, and the difference is recorded in ADR 0001:
 
   Upstream repository: https://github.com/OpenBMB/UltraRAG
   Upstream revision:   3a709a2aea3fbe46acca59c422621c94b6e86857
@@ -18,9 +18,21 @@ No UltraRAG source file is copied, vendored, or redistributed by this package. T
 
 THE DIFFERENCE THIS PACKAGE MAKES
 
-Global memory keeps UltraRAG's own layout inside UltraRAG's UI storage tree: <storage-root>/memory/<user_id>/MEMORY.md and .../project/<YYYY-MM-DD>.md.
+Global memory keeps UltraRAG's own layout inside UltraRAG's UI storage tree: <storage-root>/memory/default/MEMORY.md and .../project/<YYYY-MM-DD>.md, which is the directory UltraRAG names for the user it is given when none is named.
 
 Local memory is kept inside the project this server is bound to, at <project-root>/.memory-rag/, in the same shape and format, so a project's memory is private to that project and travels with it. The reference implementation keeps every scope under one storage tree; this package moves the project scope into the project and binds the project at startup. The remaining choices - the four-tool surface, validating the roots before serving, and the browser view - are listed in README.md and summarised below.
+
+LOCAL MODEL AND LIBRARY ATTRIBUTION
+
+A lookup runs a local sentence embedder on the CPU, and the search uses a word index. The weights are fetched once from the model host into this package's own cache and then run in this process. No API is used at any point, and no data leaves the machine.
+
+  Embedding model:  BAAI/bge-small-en-v1.5 (default; others are listed in src/memory_ultra_rag_mcp/models.py)
+  Model license:    MIT (BAAI)
+  Run-time library: fastembed (Apache License 2.0), embedding via ONNX Runtime (MIT)
+  Arithmetic:        numpy (BSD 3-Clause)
+  Word index:        SQLite FTS5, part of the Python standard library's sqlite3 module
+
+The default model is the one the collection's other server measures, chosen because it is the smallest of the candidates and there are numbers behind it. The models are data, not source: none of their code is copied or redistributed here, and each carries its own licence.
 
 THE BROWSER VIEW
 

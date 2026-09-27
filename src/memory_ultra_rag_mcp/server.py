@@ -20,6 +20,7 @@ window on it.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from collections.abc import AsyncIterator, Sequence
@@ -41,14 +42,12 @@ from .config import (
     ServerConfig,
     resolve_config,
 )
-from .index import IndexError, MemoryIndex, fts5_available
+from .index import IndexError, fts5_available
 from .instructions import SERVER_INSTRUCTIONS
+from .models import DEFAULT_EMBEDDING_MODEL, LocalEmbedder, LocalReranker, ModelError
+from .retrieval import Retrieval, RetrievalSettings
 from .store import (
     StoreError,
-    append_statement,
-    daily_rounds,
-    read_standing,
-    standing_document,
 )
 
 __all__ = ["SERVER_NAME", "create_server", "main"]
@@ -108,17 +107,37 @@ def create_server(
     config: ServerConfig,
     *,
     ui_port: int | None = None,
+    retrieval: Retrieval | None = None,
+    warm: bool = True,
 ) -> FastMCP[Any]:
     """Create the server that serves one project's memory and the global tree.
 
     With ``ui_port`` the same process also serves the browser view of exactly the
     memory these tools serve. Without it, nothing of this package's view module is
     imported and no port is opened.
+
+    Retrieval is injected, which is what lets the test suite run the whole read
+    and write path without a model. When it is not supplied the local models are
+    used, and they are warmed on this side of the process rather than a caller's,
+    because loading one costs seconds and a read may not pay it.
     """
     holder: dict[str, Any] = {}
+    engine = retrieval or _local_retrieval()
 
     @asynccontextmanager
     async def lifespan(_: FastMCP[Any]) -> AsyncIterator[dict[str, Any]]:
+        if warm:
+            # Loading a model is seconds, so it happens here, on the serving side,
+            # and never in the middle of a caller's lookup. A model that cannot be
+            # fetched is reported and the read falls back to words, loudly.
+            report = await asyncio.to_thread(engine.warm)
+            if not report.get("embedding_loaded", False):
+                print(
+                    f"{SERVER_NAME}: the semantic side is unavailable "
+                    f"({report.get('embedding_error', 'unknown')}); "
+                    "reads match words only until the model is fetched",
+                    file=sys.stderr,
+                )
         if ui_port is None:
             yield {}
             return
@@ -126,7 +145,7 @@ def create_server(
         # it, and because a server that serves no view needs none of its code.
         from .ui import UIPort
 
-        view = UIPort(config, port=ui_port)
+        view = UIPort(config, port=ui_port, retrieval=engine)
         await view.start()
         holder["view"] = view
         if view.error is not None:
@@ -158,11 +177,7 @@ def create_server(
         nothing to name and nothing to choose.
         """
         directory = config.global_directory
-        try:
-            digest = append_statement(directory, content)
-        except StoreError as error:
-            raise ToolError(str(error)) from error
-        return _recorded(directory, digest)
+        return _recorded(engine, "global", directory, content)
 
     @server.tool(name="set_memory_local", annotations=WRITE_ANNOTATIONS)
     def set_memory_local(content: ContentParameter) -> dict[str, Any]:
@@ -173,11 +188,7 @@ def create_server(
         The statement is appended to this project's standing document, inside the
         repository under `.memory-rag`, so it travels with the project.
         """
-        try:
-            digest = append_statement(config.local_directory, content)
-        except StoreError as error:
-            raise ToolError(str(error)) from error
-        return _recorded(config.local_directory, digest)
+        return _recorded(engine, "local", config.local_directory, content)
 
     @server.tool(name="get_memory_global", annotations=READ_ONLY_ANNOTATIONS)
     def get_memory_global(
@@ -190,7 +201,7 @@ def create_server(
         that match the query. This is the account's one global memory, shared by
         every project on this storage root.
         """
-        return _recalled("global", config.global_directory, query, limit)
+        return _answer(engine, "global", config.global_directory, query, limit)
 
     @server.tool(name="get_memory_local", annotations=READ_ONLY_ANNOTATIONS)
     def get_memory_local(
@@ -204,25 +215,45 @@ def create_server(
         query, newest first. Nothing outside this repository is read, and no other
         project's memory is reachable from here.
         """
-        return _recalled("local", config.local_directory, query, limit)
+        return _answer(engine, "local", config.local_directory, query, limit)
 
     return server
 
 
-def _recalled(
+def _recorded(
+    engine: Retrieval,
+    scope: str,
+    directory: Path,
+    content: str,
+) -> dict[str, Any]:
+    """Record one statement, reporting what the semantic side has queued for it.
+
+    The statement is durable before this returns, and the vector is queued rather
+    than computed here, so a write costs one append and no inference. A model
+    that cannot be fetched leaves the unit pending, which the read reports, and
+    never fails the write.
+    """
+
+    del scope
+    try:
+        return engine.record(directory, content)
+    except ModelError as error:
+        raise ToolError(str(error)) from error
+
+
+def _answer(
+    engine: Retrieval,
     scope: str,
     directory: Path,
     query: str,
     limit: int,
 ) -> dict[str, Any]:
-    """Answer one read from a scope, and report what was searched.
+    """Answer one read, and refuse the one question a read must not answer.
 
-    Nothing here returns a memory. The answer is the units that matched — a
-    statement from the standing document, or a dated round — and nothing else, so
-    the cost of a read is a lookup and a page of rows rather than a pass over
-    every file the memory holds. The index is derived from those files, so a
-    memory edited by hand is read correctly; the report says which file each unit
-    came from so a caller can go to the original.
+    An empty query is refused rather than answered with everything, because a
+    memory grows by appending and handing one to a model whole spends the context
+    window on the file. The answer also reports when a file was edited behind our
+    back, which is what ``memory-ultra-rag-reindex`` is for.
     """
 
     if not str(query or "").strip():
@@ -232,56 +263,21 @@ def _recalled(
             "appending and reading it all would spend the context window on it"
         )
     capped = max(1, min(int(limit), MAX_RESULT_LIMIT))
-
-    # Upstream creates the scope's standing document from its template on the
-    # first read, and that is how a scope comes into being. The index does not
-    # need the file, but the contract does, so it happens before the search.
-    read_standing(directory)
-
-    with MemoryIndex(directory) as index:
-        try:
-            found, mode = index.search(query, capped)
-        except IndexError as error:
-            raise ToolError(str(error)) from error
-        state = index.sync()
-        index_path = index.path
-
-    # One row past the limit is how the index says there was more to come.
-    truncated = len(found) > capped
-    units = [
-        {
-            "kind": unit["kind"],
-            "text": unit["text"],
-            "source": unit["source"],
-            "stamp": unit["stamp"],
-        }
-        for unit in found[:capped]
-    ]
-    return {
-        "scope": scope,
-        "query": str(query),
-        "matched_by": mode,
-        "units": units,
-        "returned": len(units),
-        "truncated": truncated,
-        "searched": {
-            "directory": str(directory),
-            "index": str(index_path),
-            "units_indexed": state["units"],
-            "files_indexed": state["files"],
-        },
-    }
+    try:
+        return engine.answer(
+            scope=scope, directory=directory, query=str(query), limit=capped
+        )
+    except (IndexError, StoreError) as error:
+        raise ToolError(str(error)) from error
 
 
-def _recorded(scope_directory: Path, digest: str) -> dict[str, Any]:
-    """Describe one recorded statement the same way for both kinds of memory."""
-    return {
-        "status": "set",
-        "directory": str(scope_directory),
-        "standing_document": str(standing_document(scope_directory)),
-        "sha256": digest,
-        "rounds_directory": str(daily_rounds(scope_directory)),
-    }
+def _local_retrieval(model: str = DEFAULT_EMBEDDING_MODEL) -> Retrieval:
+    """Build this process's retrieval from the local models."""
+
+    embedder = LocalEmbedder(model)
+    policy = RetrievalSettings(embedding_model=embedder.identity.name)
+    reranker = LocalReranker(policy.reranker_model) if policy.reranker_model else None
+    return Retrieval(embedder=embedder, policy=policy, reranker=reranker)
 
 
 def _ui_port_from_environment() -> int | None:
