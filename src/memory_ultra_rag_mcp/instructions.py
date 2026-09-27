@@ -36,13 +36,16 @@ How to use them:
    the project's memory when you are working inside it, then act on what they say.
 3. A read takes a query, and that is deliberate: these memories grow by appending,
    so they are answered rather than returned whole, to keep the context window for
-   the work instead of for the file. Ask for what you need in words. The standing
-   document comes back whole because it is small and curated, and the dated rounds
-   that match come back newest first, up to the limit you pass.
-4. A read reports what it searched and whether anything was left out. If it says
-   it was truncated, narrow the query or raise the limit rather than repeating the
-   same broad one. If nothing matched, that is what it searched and found; widen
-   the words rather than concluding the memory is empty.
+   the work instead of for the file. Ask for what you need in words. What comes
+   back is only the parts that matched — a statement, or an exchange — each with
+   the file and date it came from. There is no way to read a whole memory, and
+   asking for more than `limit` will not produce one.
+4. Read the answer before drawing a conclusion from it. `matched_by` says whether
+   every word of your query was found (`all-words`) or whether the search fell
+   back to the words that occur least (`rarest-words`), which is broader and may
+   include something merely adjacent. If `truncated` is set, narrow the query
+   rather than repeating a broad one. If nothing came back, that is what the
+   search found; try other words rather than concluding the memory is empty.
 5. Record one statement at a time, in the words it should be remembered in. The
    user id on the global tools defaults to "default"; the project is the one this
    server was started for, so no project argument is needed. Say which kind you

@@ -15,7 +15,13 @@ The behaviour, the tool names, the file names, and the byte formats are UltraRAG
 
 ## Requirements
 
-CPython 3.11 or 3.12, Linux, and `uv`. No UltraRAG checkout is needed: the formats are verified against captured fixtures, and both roots are ordinary directories this server creates as it needs them. The browser view is the shared [`ui-ultra-rag-mcp`](https://github.com/AhmedKishki/ui-ultra-rag-mcp) package, pinned by commit and installed with this one.
+CPython 3.11 or 3.12, Linux, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), and a SQLite built with FTS5, which the search index needs. Run the probe to check that last one:
+
+```bash
+uv run --frozen python scripts/check_sqlite_fts5.py
+```
+
+Without FTS5 the server refuses to start, because a read would have to pass over every file a memory holds, which is the cost the index exists to remove. No UltraRAG checkout is needed: the formats are verified against captured fixtures and, when a checkout is available, against the real server. The browser view is the shared [`ui-ultra-rag-mcp`](https://github.com/AhmedKishki/ui-ultra-rag-mcp) package, pinned by commit and installed with this one.
 
 ## Install
 
@@ -62,14 +68,15 @@ One server instance serves one project, so `--project-root` binds the session: l
 
 Two verbs, two scopes, and the scope in the name, so the only decision an agent makes is whether a memory is this project's or this user's. A `user_id` holds letters, digits, `_` and `-`, which is both upstream's rule and what keeps a user's memory to one directory.
 
-**A read takes a query, and never returns a memory whole.** These memories grow by appending, so handing one to a model whole would spend the context window on the file instead of on the work. A read searches the standing document and the dated rounds for the query's words and answers with:
+**A read takes a query, and returns only what matched.** These memories grow by appending, so handing one to a model whole would spend the context window on the file instead of on the work. A read searches the scope's files and answers with:
 
-- the standing document, whole and bounded, because it is the small curated part and the rules live in it;
-- the lines of it the query matched, so the agent can see why without a second copy of the file;
-- up to `limit` dated rounds that matched, ranked by the longest word they share with the query, then by how many, then newest first;
-- how many rounds matched in total, how many were returned, whether anything was left out, and what was searched.
+- the units that matched — a statement from the standing document, or a dated round — at most `limit` of them, ranked by the index;
+- how it matched: `all-words` when the query's words are all present, or `rarest-words` when nothing held all of them and the query fell back to the words that occur in the fewest units;
+- whether anything was left out, and where the index and the files are.
 
-Matching is a substring test over the files themselves: no index, no model, and nothing outside the scope being read. An empty query is refused rather than answered with everything.
+Every unit names the file and stamp it came from, so a caller can go to the original. Nothing else is returned: no file, no document, no whole memory.
+
+Matching runs over an FTS5 index — a SQLite index built from the memory's own files, beside them, named `index.sqlite3`. A read is a lookup and a page of rows rather than a pass over every dated file, so its cost does not grow with the memory; measured on this repository's corpus shape, a query costs the same over 50,000 rounds as over 1,000. The index is derived, not the record: the Markdown files are, they are what a person edits and what a UltraRAG UI reads, and the index is rebuilt from them whenever they change, including a hand edit. Deleting it costs one rebuild. The query is words, not meaning: a paraphrase is found only when the words are present.
 
 **A write records one statement.** `set_*` appends the statement to the standing document as plain text, with no speaker attached to it: it is what you chose to remember, not something the user said and not something an assistant replied. The dated dialogue files stay the exchange history, and the browser view is what writes them.
 
@@ -100,8 +107,10 @@ The view shows the bound project's memory and every user's global memory **toget
 ```
 <project-root>/.memory-rag/MEMORY.md                  the project's standing memory
 <project-root>/.memory-rag/project/<date>.md          the project's rounds, by day
+<project-root>/.memory-rag/index.sqlite3              derived search index, disposable
 <storage-root>/memory/<user_id>/MEMORY.md             a user's standing memory
 <storage-root>/memory/<user_id>/project/<date>.md     that user's rounds, by day
+<storage-root>/memory/<user_id>/index.sqlite3         derived search index, disposable
 ```
 
 A standing document holds statements, one block per write, after the template UltraRAG seeds it with:
@@ -161,8 +170,9 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 10 | Global memory defaults to this account's home data directory, and moves by flag or variable | it belongs to the user rather than to a project, and the default follows the sibling repositories' pattern: one flag, one variable, a place in the home directory |
 | 11 | The tool names are renamed to two verbs and two scopes, and upstream's names are not re-exposed | the agent's only decision should be which kind of memory it is, so the scope is in the name and there is nothing else to choose between |
 | 12 | A read takes a query and answers it, and no tool returns a memory whole | a memory grows by appending; reading it whole spends the context window on the file instead of on the work, and would be unusable after a few weeks |
-| 13 | Retrieval is a substring search over the scope's own files, with no index and no model | a grep is what these files support, it is explainable, and it keeps the no-model line that the rest of the design rests on |
-| 14 | A statement is appended to the standing document, and the dated files stay the exchange history | a statement is not an exchange, and attributing one to the user or to an assistant would put a claim in the file that nobody made |
+| 13 | The search runs over an FTS5 index built from the memory's own files, kept beside them and disposable | a read is then a lookup and a page of rows rather than a pass over every dated file, so its cost does not grow with the memory; the files stay the record, so an index is never the thing that is true |
+| 14 | The index follows the files instead of leading them, and no write path updates it | a memory edited by hand or by a UltraRAG UI is read correctly, because a read compares each file against what was indexed and re-reads only what changed |
+| 15 | A statement is appended to the standing document, and the dated files stay the exchange history | a statement is not an exchange, and attributing one to the user or to an assistant would put a claim in the file that nobody made |
 
 ## Develop and test
 

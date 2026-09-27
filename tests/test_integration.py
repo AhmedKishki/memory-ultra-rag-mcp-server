@@ -76,8 +76,8 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
 
     # The other project reads its own memory, which says nothing about the thesis.
     assert other["searched"]["directory"] == str(notes / ".memory-rag")
-    assert "The thesis lives in drafts/" not in other["standing_content"]
-    assert other["matched"] == 0
+    assert "The thesis lives in drafts/" not in json.dumps(other)
+    assert other["units"] == []
 
 
 def test_both_projects_share_the_global_memory(
@@ -103,7 +103,7 @@ def test_both_projects_share_the_global_memory(
 
     read, directory = asyncio.run(scenario())
     assert directory == str(storage / "memory" / "ahmed")
-    assert "Prefer British English" in read["standing_content"]
+    assert [unit["text"] for unit in read["units"]] == ["Prefer British English"]
     assert read["scope"] == "global"
     # The second project's server read the same global tree.
-    assert "MEMORY" in read["standing_content"]
+    assert "Prefer British English" in json.dumps(read)

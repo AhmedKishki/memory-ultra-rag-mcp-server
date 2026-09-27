@@ -13,9 +13,7 @@ from memory_ultra_rag_mcp.store import (
     append_round,
     append_statement,
     daily_rounds,
-    query_terms,
     read_standing,
-    search_entries,
     standing_document,
     user_id_error,
 )
@@ -132,52 +130,3 @@ def test_a_statement_writes_no_dated_round(tmp_path: Path) -> None:
     scope = tmp_path / "scope"
     append_statement(scope, "a fact")
     assert not daily_rounds(scope).exists()
-
-
-def test_a_query_is_split_into_plain_words() -> None:
-    """Matching is a substring test, so the words are stripped, not parsed."""
-
-    assert query_terms("Where does the Draft live?") == (
-        "where",
-        "does",
-        "the",
-        "draft",
-        "live",
-    )
-    assert query_terms("draft draft") == ("draft",)
-    assert query_terms("  ") == ()
-
-
-def test_rounds_are_searched_by_their_words(tmp_path: Path) -> None:
-    scope = tmp_path / "scope"
-    append_round(scope, ["where is the draft"], ["in docs/"], now=MOMENT)
-    append_round(scope, ["what about tea"], ["nothing"], now=MOMENT)
-
-    entries, matched, total, files = search_entries(scope, query_terms("draft"), 10)
-    assert matched == 1
-    assert total == 2
-    assert files == 1
-    assert entries[0]["text"] == "where is the draft\nin docs/"
-    assert entries[0]["date"] == "2026-09-22"
-    assert entries[0]["source_file"] == "2026-09-22.md"
-
-    assert search_entries(scope, query_terms("unrelated"), 10) == ([], 0, 2, 1)
-
-
-def test_the_longest_matching_word_wins(tmp_path: Path) -> None:
-    """A question must not match on its commonest word."""
-
-    scope = tmp_path / "scope"
-    append_round(scope, ["the build is green"], ["ok"], now=MOMENT)
-    append_round(scope, ["the build log is long"], ["ok"], now=MOMENT)
-
-    entries, matched, _, _ = search_entries(scope, query_terms("build log"), 10)
-    assert matched == 2
-    assert entries[0]["text"].startswith("the build log")
-    assert entries[0]["score"] == 2
-    assert entries[1]["score"] == 1
-
-
-def test_a_search_of_a_scope_with_no_rounds_is_empty(tmp_path: Path) -> None:
-    scope = tmp_path / "scope"
-    assert search_entries(scope, query_terms("anything"), 10) == ([], 0, 0, 0)

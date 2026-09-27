@@ -128,7 +128,7 @@ async def _exercise_ours(
         tools = sorted(tool.name for tool in await client.list_tools())
         read = _data(
             await client.call_tool(
-                "get_memory_global", {"user_id": USER_ID, "query": "draft"}
+                "get_memory_global", {"user_id": USER_ID, "query": "MEMORY"}
             )
         )
     append_round(global_memory_root(storage) / USER_ID, [QUESTION], [ANSWER])
@@ -177,13 +177,20 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
 
     # The read: the same standing document comes back, by a deliberately different
     # route. Upstream returns the whole file under one key; this side returns the
-    # document bounded, the rounds that matched a query, and what it searched.
+    # units that matched a query, and at this point the standing document is the
+    # template, so the one unit is the whole document, byte for byte.
     assert upstream_read == {
         "global_memory_content": upstream_standing.decode(),
         "current_user_id": USER_ID,
     }
-    assert our_read["standing_content"] == upstream_read["global_memory_content"]
     assert our_read["scope"] == "global"
+    assert our_read["matched_by"] == "all-words"
+    # A unit is the document's content without its trailing newline, which is
+    # what a statement is; the bytes on disk are compared above, unchanged.
+    assert [unit["text"] for unit in our_read["units"]] == [
+        upstream_standing.decode().strip()
+    ]
+    assert our_read["units"][0]["source"] == "MEMORY.md"
     assert our_read["searched"]["directory"] == str(
         global_memory_root(our_storage) / USER_ID
     )

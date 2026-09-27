@@ -41,17 +41,14 @@ from .config import (
     ServerConfig,
     resolve_config,
 )
+from .index import IndexError, MemoryIndex, fts5_available
 from .instructions import SERVER_INSTRUCTIONS
 from .store import (
-    STANDING_READ_LINE_LIMIT,
     StoreError,
     append_statement,
     daily_rounds,
-    query_terms,
     read_standing,
-    search_entries,
     standing_document,
-    standing_matching_lines,
     user_id_error,
 )
 
@@ -235,15 +232,6 @@ def create_server(
     return server
 
 
-def _bounded_standing(text: str) -> tuple[str, bool]:
-    """Return at most the first ``STANDING_READ_LINE_LIMIT`` lines of a document."""
-
-    lines = text.splitlines()
-    if len(lines) <= STANDING_READ_LINE_LIMIT:
-        return text, False
-    return "\n".join(lines[:STANDING_READ_LINE_LIMIT]), True
-
-
 def _recalled(
     scope: str,
     directory: Path,
@@ -252,10 +240,12 @@ def _recalled(
 ) -> dict[str, Any]:
     """Answer one read from a scope, and report what was searched.
 
-    The standing document is returned whole and bounded, because it is the curated
-    part of the memory and the rules live in it. The dated rounds are the part that
-    grows without limit, so only the ones the query matches are returned, capped,
-    with the number that matched behind them and the number that was read.
+    Nothing here returns a memory. The answer is the units that matched — a
+    statement from the standing document, or a dated round — and nothing else, so
+    the cost of a read is a lookup and a page of rows rather than a pass over
+    every file the memory holds. The index is derived from those files, so a
+    memory edited by hand is read correctly; the report says which file each unit
+    came from so a caller can go to the original.
     """
 
     if not str(query or "").strip():
@@ -265,27 +255,43 @@ def _recalled(
             "appending and reading it all would spend the context window on it"
         )
     capped = max(1, min(int(limit), MAX_RESULT_LIMIT))
-    terms = query_terms(query)
 
-    standing = read_standing(directory)
-    standing_content, standing_truncated = _bounded_standing(standing)
-    entries, matched, rounds_read, files_read = search_entries(directory, terms, capped)
+    # Upstream creates the scope's standing document from its template on the
+    # first read, and that is how a scope comes into being. The index does not
+    # need the file, but the contract does, so it happens before the search.
+    read_standing(directory)
+
+    with MemoryIndex(directory) as index:
+        try:
+            found, mode = index.search(query, capped)
+        except IndexError as error:
+            raise ToolError(str(error)) from error
+        state = index.sync()
+        index_path = index.path
+
+    # One row past the limit is how the index says there was more to come.
+    truncated = len(found) > capped
+    units = [
+        {
+            "kind": unit["kind"],
+            "text": unit["text"],
+            "source": unit["source"],
+            "stamp": unit["stamp"],
+        }
+        for unit in found[:capped]
+    ]
     return {
         "scope": scope,
         "query": str(query),
-        "search_terms": list(terms),
-        "standing_content": standing_content,
-        "standing_truncated": standing_truncated,
-        "standing_lines_matched": standing_matching_lines(standing_content, terms),
-        "entries": entries,
-        "matched": matched,
-        "returned": len(entries),
-        "truncated": matched > len(entries) or standing_truncated,
+        "matched_by": mode,
+        "units": units,
+        "returned": len(units),
+        "truncated": truncated,
         "searched": {
             "directory": str(directory),
-            "files": files_read,
-            "rounds": rounds_read,
-            "rounds_directory": str(daily_rounds(directory)),
+            "index": str(index_path),
+            "units_indexed": state["units"],
+            "files_indexed": state["files"],
         },
     }
 
@@ -374,6 +380,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if arguments.ui_port is not None and not 1 <= arguments.ui_port <= 65535:
         print(f"{SERVER_NAME}: --ui-port must be between 1 and 65535", file=sys.stderr)
+        return 2
+    if not fts5_available():
+        print(
+            f"{SERVER_NAME}: this Python's SQLite was built without FTS5, which "
+            "the search index needs. A read would otherwise have to pass over "
+            "every file a memory holds. Run scripts/check_sqlite_fts5.py for the "
+            "detail, and use a Python whose sqlite3 module includes FTS5",
+            file=sys.stderr,
+        )
         return 2
     create_server(config, ui_port=arguments.ui_port).run(
         transport="stdio", show_banner=False

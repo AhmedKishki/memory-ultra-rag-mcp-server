@@ -13,6 +13,8 @@ from fastmcp.exceptions import ToolError
 
 from memory_ultra_rag_mcp import server
 from memory_ultra_rag_mcp.config import resolve_config
+from memory_ultra_rag_mcp.index import index_path
+from memory_ultra_rag_mcp.store import append_round, append_statement
 
 
 def _config(tmp_path: Path):
@@ -90,62 +92,91 @@ def test_a_global_statement_is_written_under_the_storage_root(tmp_path: Path) ->
 
     recorded, read = asyncio.run(scenario())
     assert recorded["directory"] == str(config.global_root / "ahmed")
-    assert "always cite the commit" in read["standing_content"]
     assert read["scope"] == "global"
+    assert [unit["text"] for unit in read["units"]] == ["always cite the commit"]
+    assert read["units"][0]["kind"] == "statement"
     assert (config.global_root / "ahmed" / "MEMORY.md").is_file()
 
 
-def test_a_read_answers_a_query_instead_of_returning_the_file(tmp_path: Path) -> None:
-    """A read takes a query, and returns the standing document plus matches."""
+def test_a_read_returns_the_matching_units_and_nothing_else(tmp_path: Path) -> None:
+    """The answer is what matched; a memory is never handed over whole."""
 
     config = _config(tmp_path)
     app = server.create_server(config)
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
-            await client.call_tool(
-                "set_memory_local", {"content": "docs/ has the draft"}
-            )
-            await client.call_tool("set_memory_local", {"content": "tests run with uv"})
-            # Dated rounds are the history; only the store writes them now.
-            from memory_ultra_rag_mcp.store import append_round
-
+            append_statement(config.local_directory, "docs/ has the draft")
+            append_statement(config.local_directory, "tests run with uv")
             append_round(config.local_directory, ["where is the draft"], ["in docs/"])
             append_round(config.local_directory, ["morning coffee"], ["tea"])
             return _data(await client.call_tool("get_memory_local", {"query": "draft"}))
 
     read = asyncio.run(scenario())
     assert read["scope"] == "local"
-    assert "docs/ has the draft" in read["standing_content"]
-    assert "docs/ has the draft" in read["standing_lines_matched"]
-    assert [entry["text"] for entry in read["entries"]] == [
-        "where is the draft\nin docs/"
-    ]
-    assert read["matched"] == 1
-    assert read["returned"] == 1
+    assert read["matched_by"] == "all-words"
+    # Both units that hold "draft" come back, in the index's order.
+    assert {unit["text"] for unit in read["units"]} == {
+        "docs/ has the draft",
+        "where is the draft\nin docs/",
+    }
+    assert read["returned"] == 2
     assert read["truncated"] is False
-    assert read["searched"]["rounds"] == 2
-    assert read["searched"]["files"] == 1
+    assert read["searched"]["directory"] == str(config.local_directory)
+    # The other statement and the coffee round are not in the answer.
+    answer = json.dumps(read)
+    assert "tests run with uv" not in answer
+    assert "morning coffee" not in answer
+    # Every unit says where it came from, so a caller can go to the original.
+    assert {unit["source"] for unit in read["units"]} <= {
+        "MEMORY.md",
+        *(
+            f"project/{path.name}"
+            for path in (config.local_directory / "project").glob("*.md")
+        ),
+    }
 
 
-def test_a_common_word_does_not_outrank_a_distinctive_one(tmp_path: Path) -> None:
-    """Ranking is by the longest query term a round holds, not by any word."""
-
+def test_a_read_finds_a_statement_and_a_round_together(tmp_path: Path) -> None:
     config = _config(tmp_path)
     app = server.create_server(config)
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
-            from memory_ultra_rag_mcp.store import append_round
-
-            append_round(config.local_directory, ["the build ran"], ["ok"])
-            append_round(config.local_directory, ["a build note"], ["ok"])
-            return _data(await client.call_tool("get_memory_local", {"query": "build"}))
+            append_statement(config.local_directory, "the draft index is in docs/")
+            append_round(config.local_directory, ["where is the draft"], ["in docs/"])
+            return _data(await client.call_tool("get_memory_local", {"query": "draft"}))
 
     read = asyncio.run(scenario())
-    assert read["matched"] == 2
-    # Both rounds hold the same term, so recency decides.
-    assert read["entries"][0]["text"].startswith("a build note")
+    assert read["returned"] == 2
+    assert {unit["kind"] for unit in read["units"]} == {"statement", "round"}
+
+
+def test_a_query_falls_back_to_the_words_that_exist(tmp_path: Path) -> None:
+    """A question with words no round holds still finds the round that is close."""
+
+    config = _config(tmp_path)
+    app = server.create_server(config)
+
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+        async with Client(app) as client:
+            append_round(config.local_directory, ["where is the draft"], ["in docs/"])
+            question = _data(
+                await client.call_tool(
+                    "get_memory_local", {"query": "where does the draft live"}
+                )
+            )
+            exact = _data(
+                await client.call_tool("get_memory_local", {"query": "draft"})
+            )
+            return question, exact
+
+    question, exact = asyncio.run(scenario())
+    assert exact["matched_by"] == "all-words"
+    assert question["matched_by"] == "rarest-words"
+    assert [unit["text"] for unit in question["units"]] == [
+        "where is the draft\nin docs/"
+    ]
 
 
 def test_a_read_is_capped_and_says_so(tmp_path: Path) -> None:
@@ -154,8 +185,6 @@ def test_a_read_is_capped_and_says_so(tmp_path: Path) -> None:
 
     async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
         async with Client(app) as client:
-            from memory_ultra_rag_mcp.store import append_round
-
             for index in range(5):
                 append_round(config.local_directory, [f"draft note {index}"], ["noted"])
             return (
@@ -171,7 +200,6 @@ def test_a_read_is_capped_and_says_so(tmp_path: Path) -> None:
     assert everything["returned"] == 5
     assert everything["truncated"] is False
     assert capped["returned"] == 2
-    assert capped["matched"] == 5
     assert capped["truncated"] is True
 
 
@@ -186,6 +214,51 @@ def test_a_read_without_a_query_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(ToolError, match="query must not be empty"):
         asyncio.run(scenario())
+
+
+def test_a_read_answers_from_a_memory_edited_by_hand(tmp_path: Path) -> None:
+    """The index follows the files, so a hand edit is what gets read."""
+
+    config = _config(tmp_path)
+    app = server.create_server(config)
+
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+        async with Client(app) as client:
+            first = _data(
+                await client.call_tool("get_memory_local", {"query": "quixotic"})
+            )
+            standing = config.local_directory / "MEMORY.md"
+            standing.write_text(
+                standing.read_text(encoding="utf-8")
+                + "\nthe quixotic release is in tags\n",
+                encoding="utf-8",
+            )
+            second = _data(
+                await client.call_tool("get_memory_local", {"query": "quixotic"})
+            )
+            return first, second
+
+    before, after = asyncio.run(scenario())
+    assert before["units"] == []
+    assert [unit["text"] for unit in after["units"]] == [
+        "the quixotic release is in tags"
+    ]
+
+
+def test_the_index_is_derived_and_can_be_deleted(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    app = server.create_server(config)
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            append_statement(config.local_directory, "the draft lives in docs/")
+            await client.call_tool("get_memory_local", {"query": "draft"})
+            index_path(config.local_directory).unlink()
+            return _data(await client.call_tool("get_memory_local", {"query": "draft"}))
+
+    read = asyncio.run(scenario())
+    assert [unit["text"] for unit in read["units"]] == ["the draft lives in docs/"]
+    assert index_path(config.local_directory).is_file()
 
 
 def test_the_two_kinds_do_not_share_a_directory(tmp_path: Path) -> None:
@@ -203,10 +276,13 @@ def test_the_two_kinds_do_not_share_a_directory(tmp_path: Path) -> None:
     local, default_user = asyncio.run(scenario())
     assert local["searched"]["directory"] == str(config.local_directory)
     assert default_user["searched"]["directory"] == str(config.global_root / "default")
-    assert "MEMORY" in local["standing_content"]
-    assert "MEMORY" in default_user["standing_content"]
+    # A first read brings each scope into being, as upstream does, and each scope
+    # indexes its own files.
     assert (config.local_directory / "MEMORY.md").is_file()
     assert (config.global_root / "default" / "MEMORY.md").is_file()
+    assert local["searched"]["index"] != default_user["searched"]["index"]
+    assert local["units"] == []
+    assert default_user["units"] == []
 
 
 def test_a_project_read_cannot_see_another_projects_memory(tmp_path: Path) -> None:
@@ -232,8 +308,8 @@ def test_a_project_read_cannot_see_another_projects_memory(tmp_path: Path) -> No
         return read, missing
 
     read, missing = asyncio.run(scenario())
-    assert "first only" not in read["standing_content"]
-    assert missing["matched"] == 0
+    assert "first only" not in json.dumps(read)
+    assert missing["units"] == []
 
 
 def test_an_unusable_user_id_is_refused(tmp_path: Path) -> None:

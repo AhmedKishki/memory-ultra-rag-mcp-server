@@ -23,13 +23,11 @@ import hashlib
 import os
 import re
 import tempfile
-from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
 __all__ = [
     "EMPTY_MESSAGE_ERRORS",
-    "STANDING_READ_LINE_LIMIT",
     "TEMPLATE",
     "StoreError",
     "append_round",
@@ -40,10 +38,8 @@ __all__ = [
     "list_rounds",
     "query_terms",
     "read_standing",
-    "search_entries",
     "standing_digest",
     "standing_document",
-    "standing_matching_lines",
     "user_id_error",
     "write_standing",
 ]
@@ -66,11 +62,6 @@ EMPTY_MESSAGE_ERRORS = (
     "user_message cannot be empty.",
     "assistant_message cannot be empty.",
 )
-
-#: How much of a standing document one read may return. The document is the
-#: curated part of a scope and is meant to be read whole, but it is a file a user
-#: and an agent both write, so a read is bounded and says when it stopped.
-STANDING_READ_LINE_LIMIT = 100
 
 
 class StoreError(ValueError):
@@ -154,105 +145,6 @@ def query_terms(query: str) -> tuple[str, ...]:
         if cleaned and cleaned not in terms:
             terms.append(cleaned)
     return tuple(terms)
-
-
-def standing_matching_lines(
-    standing_text: str,
-    terms: Sequence[str],
-    limit: int = 10,
-) -> list[str]:
-    """Return the standing document's lines that contain any of these terms.
-
-    This is the document already being returned, so the lines are returned as
-    pointers into it rather than as a second copy of the whole thing: an agent
-    can see which of its standing statements a query touches without the answer
-    repeating the file.
-    """
-
-    if not terms:
-        return []
-    matched: list[str] = []
-    for line in standing_text.splitlines():
-        folded = line.casefold()
-        if any(term in folded for term in terms):
-            matched.append(line.strip())
-            if len(matched) >= limit:
-                break
-    return matched
-
-
-def _entry_text(entry: Mapping[str, str]) -> str:
-    """Return the searchable text of one parsed round, both turns included."""
-
-    return f"{entry.get('user', '')}\n{entry.get('assistant', '')}"
-
-
-def search_entries(
-    scope_directory: Path,
-    terms: Sequence[str],
-    limit: int,
-) -> tuple[list[dict[str, object]], int, int, int]:
-    """Search a scope's dated rounds, newest first, and report what was read.
-
-    Returns the matching rounds with their scores, how many rounds matched in
-    total, how many rounds were read, and how many files were read.
-
-    Ranking is by the longest query term a round contains, then by how many terms
-    it contains, then by recency. Ranking on the longest term is what keeps a
-    question from matching on its commonest word: in "where does the draft live",
-    a round holding ``draft`` outranks a round that only holds ``the``, without a
-    list of words to exclude. This is a grep over the scope's own files — no
-    index, no model, and nothing outside this scope is read.
-    """
-
-    rounds = daily_rounds(scope_directory)
-    if not rounds.is_dir():
-        return [], 0, 0, 0
-
-    files = sorted(rounds.glob("*.md"), key=lambda item: item.stem, reverse=True)
-    scored: list[tuple[int, int, str, str, dict[str, str]]] = []
-    total = 0
-    for path in files:
-        for entry in reversed(
-            _parse_rounds(path.read_text(encoding="utf-8"), path.name)
-        ):
-            total += 1
-            if not terms:
-                continue
-            folded = _entry_text(entry).casefold()
-            present = [term for term in terms if term in folded]
-            if present:
-                scored.append(
-                    (
-                        max(len(term) for term in present),
-                        len(present),
-                        entry.get("date", ""),
-                        entry.get("time", ""),
-                        entry,
-                    )
-                )
-
-    # Longest match first, then most matches, then newest. Three stable passes,
-    # because one sort key cannot mix those directions.
-    scored.sort(key=lambda item: (item[2], item[3]), reverse=True)
-    scored.sort(key=lambda item: item[1], reverse=True)
-    scored.sort(key=lambda item: item[0], reverse=True)
-    matches: list[dict[str, object]] = [
-        {
-            "date": date,
-            "time": time,
-            "score": count,
-            "text": f"{entry.get('user', '')}".strip()
-            + (
-                f"\n{entry.get('assistant', '')}".rstrip()
-                if entry.get("assistant", "").strip()
-                else ""
-            ),
-            "source_file": entry.get("source_file", ""),
-        }
-        for _longest, count, date, time, entry in scored[: max(int(limit), 0)]
-    ]
-    return matches, len(scored), total, len(files)
 
 
 def append_round(
