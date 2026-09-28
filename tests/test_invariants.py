@@ -196,12 +196,15 @@ def test_the_derived_state_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> Non
     vectors = vector_path(directory)
     for path in (index, vectors, Path(f"{vectors}-wal"), Path(f"{vectors}-shm")):
         path.unlink(missing_ok=True)
-    assert (
-        engine.answer(scope="local", directory=directory, query="draft", limit=10)[
-            "returned"
-        ]
-        == 0
+    # A read now rebuilds the word index from the Markdown on the way in, so a
+    # thrown-away word index costs nothing to recover from. The vectors still need
+    # a reindex, so the read answers by words until they are back — and says so
+    # through units_pending rather than returning nothing.
+    after_wipe = engine.answer(
+        scope="local", directory=directory, query="draft", limit=10
     )
+    assert after_wipe["returned"] > 0
+    assert after_wipe["units_pending"] > 0
 
     rebuilt = reindex([directory], engine.embedder)
     engine.worker_for(directory).drain(10.0)

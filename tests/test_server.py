@@ -343,35 +343,120 @@ def test_a_read_without_a_query_is_refused(tmp_path: Path) -> None:
         asyncio.run(scenario())
 
 
-def test_a_read_reports_when_the_index_is_behind(tmp_path: Path) -> None:
-    """A file edited in place is not silently served from a stale index."""
+def test_a_read_serves_a_statement_written_into_the_markdown_by_hand(
+    tmp_path: Path,
+) -> None:
+    """A person editing the file is expected, so a read keeps up with it."""
 
     config = _config(tmp_path)
     embedder = FakeEmbedder()
     engine = _engine(config, embedder)
     app = server.create_server(config, retrieval=engine, warm=False)
 
-    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+    async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local", {"content": "a fact", "type": "note"}
+                "set_memory_local", {"content": "a fact", "type": "NOTE"}
             )
             engine.worker_for(config.local_directory).drain(5.0)
-            fresh = _data(await client.call_tool("get_memory_local", {"query": "fact"}))
             standing = config.local_directory / "MEMORY.md"
             standing.write_text(
-                standing.read_text(encoding="utf-8") + "\nand a hand-written line\n",
+                standing.read_text(encoding="utf-8")
+                + "\n\nTEST: a hand-written statement\n",
                 encoding="utf-8",
             )
-            behind = _data(
-                await client.call_tool("get_memory_local", {"query": "hand"})
+            return _data(
+                await client.call_tool("get_memory_local", {"query": "hand-written"})
             )
-            return fresh, behind
 
-    fresh, behind = asyncio.run(scenario())
-    assert fresh["index_files_behind"] == 0
-    # The index is behind, and the read says so rather than pretending.
-    assert behind["index_files_behind"] == 1
+    answered = asyncio.run(scenario())
+    assert "a hand-written statement" in [unit["text"] for unit in answered["units"]]
+    # The read tells the caller it had to catch up, and that the new statement is
+    # not embedded yet, which is the honest state of a hand edit.
+    assert answered["index_synced"] == 1
+    assert answered["units_pending"] == 1
+
+
+def test_a_hand_written_statement_without_a_type_is_counted(tmp_path: Path) -> None:
+    """A tool requires a type; a person typing into the file can forget one.
+
+    An untyped statement is still findable, but it is absent from every
+    type-filtered question, so a read that had to catch up counts them and says so.
+    """
+
+    config = _config(tmp_path)
+    embedder = FakeEmbedder()
+    engine = _engine(config, embedder)
+    app = server.create_server(config, retrieval=engine, warm=False)
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "set_memory_local", {"content": "a fact", "type": "NOTE"}
+            )
+            engine.worker_for(config.local_directory).drain(5.0)
+            standing = config.local_directory / "MEMORY.md"
+            standing.write_text(
+                standing.read_text(encoding="utf-8") + "\n\na bare untyped note\n",
+                encoding="utf-8",
+            )
+            return _data(
+                await client.call_tool("get_memory_local", {"query": "untyped"})
+            )
+
+    answered = asyncio.run(scenario())
+    assert "a bare untyped note" in [unit["text"] for unit in answered["units"]]
+    assert answered["unlabelled"] == 1
+
+
+def test_a_read_stops_serving_a_statement_deleted_by_hand(tmp_path: Path) -> None:
+    """The worst case of a stale index is a removed statement still answering."""
+
+    config = _config(tmp_path)
+    embedder = FakeEmbedder()
+    engine = _engine(config, embedder)
+    app = server.create_server(config, retrieval=engine, warm=False)
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "set_memory_local", {"content": "a doomed fact", "type": "NOTE"}
+            )
+            engine.worker_for(config.local_directory).drain(5.0)
+            standing = config.local_directory / "MEMORY.md"
+            standing.write_text(
+                standing.read_text(encoding="utf-8").replace(
+                    "NOTE: a doomed fact", "NOTE: something else entirely"
+                ),
+                encoding="utf-8",
+            )
+            return _data(
+                await client.call_tool("get_memory_local", {"query": "doomed"})
+            )
+
+    answered = asyncio.run(scenario())
+    # The old text is gone from the file, so the read must not still answer with it.
+    assert answered["units"] == []
+
+
+def test_an_unchanged_read_does_no_catch_up_work(tmp_path: Path) -> None:
+    """The common case must stay cheap, or the fix costs more than it saves."""
+
+    config = _config(tmp_path)
+    embedder = FakeEmbedder()
+    engine = _engine(config, embedder)
+    app = server.create_server(config, retrieval=engine, warm=False)
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "set_memory_local", {"content": "a fact", "type": "NOTE"}
+            )
+            engine.worker_for(config.local_directory).drain(5.0)
+            return _data(await client.call_tool("get_memory_local", {"query": "fact"}))
+
+    answered = asyncio.run(scenario())
+    assert answered["index_synced"] == 0
 
 
 def test_the_two_kinds_do_not_share_a_directory(tmp_path: Path) -> None:

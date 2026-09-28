@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Self
 
 from .store import (
+    STATEMENT_LABEL_PATTERN,
     TEMPLATE,
     StoreError,
     query_terms,
@@ -108,8 +109,13 @@ def _statement_units(text: str, source: str) -> list[tuple[str, str, str, str]]:
     """Return the standing document's statements as units.
 
     A statement is a block of text separated by a blank line, which is what a
-    write appends. The template's own lines are indexed too, so a query can find
-    what is already there rather than silently missing it.
+    write appends and what a person editing the Markdown by hand produces. The
+    template upstream seeds a standing document with is a seed, not something
+    anyone wrote, so it is not indexed and cannot answer a query.
+
+    ``stamp`` is the block's ordinal in the file, which is stable only because a
+    sync always re-reads the whole file: the number a caller is given is where the
+    statement sits, not its identity, which is the content hash.
     """
 
     units: list[tuple[str, str, str, str]] = []
@@ -313,13 +319,54 @@ class MemoryIndex:
 
         return self._sync([path], whole_scope=False)
 
+    def catch_up(self) -> dict[str, int]:
+        """Bring the index in step with a file edited outside these tools, cheaply.
+
+        A read calls this before it searches, so a statement a person typed into
+        the Markdown is answerable without anyone remembering to run a reindex. It
+        asks only whether the standing document changed, and does nothing at all
+        when it did not, so the common case costs one fingerprint — measured at
+        about 17 microseconds, against a read of hundreds of milliseconds. When it
+        did change, the file is re-read, which is about 2 ms for a memory of this
+        size; the vectors for any new statements are the write side's async work,
+        which the read reports as ``units_pending`` until the worker drains.
+
+        ``unlabelled`` counts statements a person wrote without a ``LABEL:``
+        prefix. The tool enforces the type, a hand edit does not, and an untyped
+        statement is silently absent from every type-filtered question — so it is
+        counted, but only on the read that had to re-read the file, never per read.
+
+        This is why the measurement behind a read not sweeping its files no longer
+        applies: it was taken in a server that kept a directory of dated files,
+        and a scope here is one document.
+        """
+
+        if not self.freshness()["files_behind"]:
+            return {
+                "synced": 0,
+                "unlabelled": 0,
+                "units": self.count_units(),
+            }
+        state = self.sync()
+        return {**state, "synced": 1, "unlabelled": self._count_unlabelled()}
+
+    def _count_unlabelled(self) -> int:
+        """Return how many held statements carry no type label.
+
+        Only called after a re-read, so the walk is over a file that already had
+        to be read once and is never paid on the common path.
+        """
+
+        connection = self._open()
+        rows = connection.execute("SELECT text FROM unit").fetchall()
+        return sum(1 for row in rows if not STATEMENT_LABEL_PATTERN.match(str(row[0])))
+
     def _sync(self, candidates: Sequence[Path], *, whole_scope: bool) -> dict[str, int]:
         """Re-read whichever of these files changed, and report what is held.
 
-        A file that only grew since it was last read is treated as an append: the
-        part already indexed is left alone and only the new bytes are parsed. A
-        file whose beginning changed, or that shrank, is re-read whole, which is
-        what a hand edit looks like.
+        A changed file is re-read whole, which is what a hand edit looks like, and
+        its previous units are replaced so a statement a person deleted stops
+        being answerable.
         """
 
         connection = self._open()
@@ -343,19 +390,20 @@ class MemoryIndex:
         indexed = 0
         for path in present:
             name = str(path.relative_to(self.scope_directory))
-            print_ = _fingerprint(path)
-            if print_ is None:
+            fingerprint = _fingerprint(path)
+            if fingerprint is None:
                 continue
-            size, mtime_ns, head = print_
-            previous = known.get(name)
-            if previous == print_:
+            if fingerprint == known.get(name):
                 continue
-            if previous is not None and previous[2] == head and size > previous[0]:
-                added = path.read_text(encoding="utf-8")[previous[0] :]
-                units = _statement_units(added, name)
-            else:
-                connection.execute("DELETE FROM unit WHERE source = ?", (name,))
-                units = _statement_units(path.read_text(encoding="utf-8"), name)
+            # Always re-read the whole file and replace its units. An earlier
+            # version parsed only the new tail when a file had merely grown, which
+            # is faster but misnumbered: the tail's blocks were numbered from zero,
+            # so every statement appended after the document passed the 4 KiB head
+            # prefix was stamped '1' — and 'stamp' is returned in every answer.
+            # Re-reading a scope's one file costs about 2 ms, measured, so the
+            # numbering is worth more than the shortcut.
+            connection.execute("DELETE FROM unit WHERE source = ?", (name,))
+            units = _statement_units(path.read_text(encoding="utf-8"), name)
             connection.executemany(
                 "INSERT INTO unit(text, unit_key, kind, source, stamp) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -367,7 +415,7 @@ class MemoryIndex:
             connection.execute(
                 "INSERT OR REPLACE INTO source(path, size, mtime_ns, head) "
                 "VALUES (?, ?, ?, ?)",
-                (name, size, mtime_ns, head),
+                (name, *fingerprint),
             )
             indexed += len(units)
 

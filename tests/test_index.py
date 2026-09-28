@@ -125,18 +125,44 @@ def test_a_statement_is_visible_once_the_write_side_has_synced_it(
     assert [unit["text"] for unit in found] == ["NOTE: the draft lives in docs/"]
 
 
-def test_a_hand_edit_is_a_reindex_rather_than_a_silent_stale_answer(
-    tmp_path: Path,
-) -> None:
-    """The deliberate cost: a read does not notice an edit behind its back.
+def test_appends_keep_numbering_past_the_head_prefix(tmp_path: Path) -> None:
+    """A statement's stamp is where it sits, so appends must not renumber from one.
 
-    A read is bounded work, so it does not walk the scope to discover a file
-    changed. It reports ``freshness`` instead, and ``reindex`` is the answer to
-    that report. This test is here so the trade cannot be changed by accident.
+    A sync used to parse only the new tail when a file had merely grown, which
+    numbered that tail from zero: past the 4 KiB head prefix every appended
+    statement was stamped '1'. `stamp` is returned in every answer, so the number
+    has to be the block's real ordinal.
     """
 
     scope = tmp_path / "scope"
-    append_statement(scope, "the draft lives in docs/", statement_type="note")
+    read_standing(scope)
+    document = standing_document(scope)
+    filler = "x" * 400  # enough statements to push the file past the head prefix
+    for number in range(20):
+        append_statement(scope, f"statement {number} {filler}", statement_type="NOTE")
+    with MemoryIndex(scope) as index:
+        index.sync_file(document)
+        rows = index._open().execute("SELECT stamp, text FROM unit").fetchall()
+
+    stamps = [str(row[0]) for row in rows]
+    assert len(rows) == 20
+    assert len(set(stamps)) == 20, f"stamps collided: {stamps}"
+    assert stamps == sorted(stamps, key=int)
+
+
+def test_search_answers_what_the_index_holds_until_it_catches_up(
+    tmp_path: Path,
+) -> None:
+    """``search`` is pure: it does not sync, and ``catch_up`` is what a read calls.
+
+    A read now keeps up with a hand edit, so this is the behaviour beneath that:
+    a bare search answers what the index holds, ``freshness`` reports the gap, and
+    a sync — ``catch_up`` on a read path, or ``reindex`` by hand — closes it. The
+    test is here so ``search`` cannot quietly start doing write work.
+    """
+
+    scope = tmp_path / "scope"
+    append_statement(scope, "the draft lives in docs/", statement_type="NOTE")
     with MemoryIndex(scope) as index:
         index.sync()
         stale, _ = index.search("draft", 10)
@@ -151,8 +177,8 @@ def test_a_hand_edit_is_a_reindex_rather_than_a_silent_stale_answer(
         # A search still answers the old text, and says the index is behind.
         served, _ = index.search("draft", 10)
         assert index.freshness()["files_behind"] == 1
-        # A reindex re-reads the file whole, because its beginning changed.
-        index.sync()
+        # catch_up is what a read does; it re-reads the file because it changed.
+        index.catch_up()
         current, _ = index.search("draft", 10)
 
     assert [unit["text"] for unit in stale] == ["NOTE: the draft lives in docs/"]

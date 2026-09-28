@@ -74,7 +74,8 @@ class Answer:
     units: list[dict[str, Any]] = field(default_factory=list)
     matched_by: str = "lexical"
     semantic_available: bool = False
-    index_behind: int = 0
+    index_synced: int = 0
+    unlabelled: int = 0
     units_pending: int = 0
     truncated: bool = False
     reranked: bool = False
@@ -92,7 +93,8 @@ class Answer:
             "truncated": self.truncated,
             "semantic_available": self.semantic_available,
             "units_pending": self.units_pending,
-            "index_files_behind": self.index_behind,
+            "index_synced": self.index_synced,
+            "unlabelled": self.unlabelled,
             "reranked": self.reranked,
             "elapsed_ms": round(self.elapsed_ms, 2),
         }
@@ -153,9 +155,14 @@ def answer_read(
     # though the document is no longer what a read returns.
     read_standing(directory)
     with MemoryIndex(directory) as index:
-        # Two stat calls, not a walk: this is what tells the caller the index may
-        # be behind without paying to find out precisely.
-        answer.index_behind = int(index.freshness()["files_behind"])
+        # Bring the word index in step with the Markdown before searching, so a
+        # statement a person edited or added by hand is answerable without anyone
+        # running a reindex. When nothing changed this is one fingerprint; when
+        # something did, the file is re-read once. Vectors for new statements are
+        # the write side's async work, and `units_pending` reports them below.
+        caught_up = index.catch_up()
+        answer.index_synced = int(caught_up["synced"])
+        answer.unlabelled = int(caught_up["unlabelled"])
 
         lexical = _lexical(index, query, pool)
         units_by_key.update(index.units_by_key([key for key, _ in lexical]))

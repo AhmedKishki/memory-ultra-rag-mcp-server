@@ -47,9 +47,14 @@ How to use them:
    whether the meaning side was there at all — when it is false, only the exact
    words would have found anything. If `truncated` is set, narrow the query rather
    than repeating a broad one. If nothing came back, that is what the search found:
-   try other words rather than concluding the memory is empty. If
-   `index_files_behind` is above zero, a file was edited outside these tools, and
-   `memory-ultra-rag-reindex` brings the search back in step with it.
+   try other words rather than concluding the memory is empty. A read brings the
+   search in step with a document someone edited by hand before it answers, so a
+   statement you typed into the Markdown is findable without a reindex; when that
+   happens `index_synced` is 1, and any new statement is briefly findable by its
+   words but not yet by its meaning, which `units_pending` reports until the
+   background worker has it. A statement a person wrote without a type is counted
+   as `unlabelled`: it is findable, but it is missing from every question asked by
+   type, so tell the user rather than leaving them to wonder.
 5. Record one statement at a time, in the words it should be remembered in, and
    say which kind you wrote to. The project is the one this server was started for,
    so no project argument is needed. A write is answered as soon as the statement

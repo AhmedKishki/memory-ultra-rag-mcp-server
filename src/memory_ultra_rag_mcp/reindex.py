@@ -1,11 +1,10 @@
 """``memory-ultra-rag-reindex``: bring a scope's derived state up to date.
 
-The write side keeps the indexes in step with what the tools and the page write,
-which is what lets a read stay cheap: it never walks a scope's files. The cost of
-that choice is that a file edited in place, behind our back, is not noticed by a
-read — a read reports ``index_files_behind`` instead, and this command is the
-answer to that report. It also rebuilds a vector file that was deleted, or one
-left by another model.
+A read now keeps the word index in step with the Markdown itself, so a statement
+someone typed or edited by hand is answerable without this command. What it still
+does is work a read will not: force a full pass rather than one gated on a
+fingerprint, embed the vectors a read left pending, and rebuild a vector file that
+was deleted or left by another model.
 
 ```bash
 uv run --frozen memory-ultra-rag-reindex --project-root /path/to/project
