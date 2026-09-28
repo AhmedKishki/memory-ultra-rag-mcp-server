@@ -1,10 +1,16 @@
 """Browser view for this server's memory, built on the shared UI package.
 
 The view is a thin adapter over the four memory tools: it lists the scopes this
-server can see — the bound project's own memory and every user's global memory in
-the shared tree — reads a scope's standing document and its recorded rounds, and,
-when the host enables writes, appends a round or replaces a standing document
-through the same store the tools use.
+server can see — the bound project's own memory and the account's global memory
+in the shared tree — reads and replaces a scope's standing document, and answers
+the shared package's round actions with an empty answer, because this memory has
+no dated rounds.
+
+The shared UI still asks for rounds: it fetches them under the same ``memory``
+capability that shows the memory view, and its page text names them. Answering
+with an empty list is what keeps that page working without a change to a package
+this one does not own, and an empty list is the true answer here. What the page
+words make of it is a rough edge in the shared package, not in this adapter.
 
 The shared UI never reads ``.memory-rag`` or the storage tree itself; every answer
 here comes from this server, and a scope string that arrives from the browser is
@@ -52,10 +58,6 @@ from .retrieval import Retrieval
 from .server import create_server
 from .store import (
     StoreError,
-    append_round,
-    count_rounds,
-    latest_round_date,
-    list_rounds,
     read_standing,
     standing_digest,
     write_standing,
@@ -102,23 +104,25 @@ MEMORY_UI_PROFILE = UIProfile(
     project_label="Project",
     project_fallback_name="Project memory",
     navigation_label="Memory views",
-    source_types_label="recorded rounds",
+    source_types_label="statements",
     ingest_intro=(
         "This server serves memory, not documents; there is no generation to build."
     ),
     ingest_busy_message="Working…",
     footer_text=(
-        "Memory records what was said, written in the format this server also "
-        "writes as the agent's tools are called."
+        "Memory records the statements that were chosen to keep, written in the "
+        "format this server also writes as the agent's tools are called."
     ),
     memory_label="Memory",
     memory_standing_label="Standing memory",
-    memory_rounds_label="Recorded rounds",
+    memory_rounds_label="Statements",
     memory_note=(
         "The bound project's memory is kept inside that project at .memory-rag; "
         "global memory is kept wherever this server's storage root points, which "
         "is this account's home data directory by default. This page and the "
-        "agent's memory tools write the same files."
+        "agent's memory tools write the same file. There are no dated exchanges: "
+        "a memory is a set of statements, and anything worth keeping is recorded "
+        "as one."
     ),
     capabilities=UICapabilities(
         # This server serves memory, not a corpus: the document workspace and the
@@ -131,6 +135,8 @@ MEMORY_UI_PROFILE = UIProfile(
         source_inclusion=False,
         source_files=False,
         metadata_filters=False,
+        # Reranking is on for the memory tools, and this flag belongs to the
+        # document search console, which this server does not serve.
         reranking=False,
         memory=True,
         memory_writes=True,
@@ -173,20 +179,13 @@ class MemoryToolClient(Protocol):
     ) -> Any: ...
 
 
-def _required_text(arguments: Mapping[str, Any], field: str) -> str:
-    value = arguments.get(field)
-    if not isinstance(value, str) or not value.strip():
-        raise UIRequestError(f"{field} must not be empty")
-    return value.strip()
-
-
 class MemoryUIAdapter:
     """Map the shared UI contract to this server's memory tools.
 
     Reads go through the same store the tools use, so the page shows exactly what
-    an agent reads. A write that the tools already perform is sent to the tool, so
-    the round is validated and formatted in one place; replacing the standing
-    document has no tool, and is the one write this adapter performs itself.
+    an agent reads. Replacing the standing document has no tool and is the one
+    write this adapter performs itself; the page's other write, a dated exchange,
+    this memory does not keep.
     """
 
     def __init__(
@@ -274,8 +273,10 @@ class MemoryUIAdapter:
             directory = entry["directory"]
             entry["directory"] = str(directory)
             entry["standing_present"] = standing_digest(directory) is not None
-            entry["round_count"] = count_rounds(directory)
-            entry["latest_round_date"] = latest_round_date(directory)
+            # The shared page shows a round count per scope. There are none, and
+            # the honest zero is what keeps its wording honest rather than wrong.
+            entry["round_count"] = 0
+            entry["latest_round_date"] = None
         return described
 
     async def status(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -298,20 +299,21 @@ class MemoryUIAdapter:
         return {"scopes": self.scopes()}
 
     async def memory_rounds(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Answer the shared package's round action with nothing, because there is none.
+
+        The page asks for rounds under the same capability that shows the memory
+        view, and an action that refused would take the whole view down with it.
+        A memory here is a set of statements, so the true answer is an empty list
+        and the page's own wording is what says otherwise.
+        """
+
         directory = self.scope_directory(arguments)
-        limit = arguments.get("limit", 20)
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or not 1 <= limit <= 200
-        ):
-            raise UIRequestError("limit must be an integer between 1 and 200")
-        rounds, truncated = list_rounds(directory, limit)
+        read_standing(directory)
         return {
             "scope": arguments.get("scope"),
-            "round_count": count_rounds(directory),
-            "truncated": truncated,
-            "rounds": rounds,
+            "round_count": 0,
+            "truncated": False,
+            "rounds": [],
         }
 
     async def memory_standing(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -325,27 +327,19 @@ class MemoryUIAdapter:
         }
 
     async def memory_append(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-        scope = str(arguments.get("scope") or "").strip()
-        directory = self.scope_directory(arguments)
-        # The page writes the exchange itself, through the same store the server
-        # reads and writes, so the daily file keeps one writer and one format. It
-        # does not go through a tool: the tools record statements, and an exchange
-        # is not a statement.
-        written = append_round(
-            directory,
-            [_required_text(arguments, "user_message")],
-            [_required_text(arguments, "assistant_message")],
+        """Refuse the page's round write, because this memory records statements.
+
+        A statement is recorded through ``set_memory_local`` or
+        ``set_memory_global``, and an exchange is not a statement. The page's
+        standing-document editor still writes, and that is the one write it has.
+        """
+
+        del arguments
+        raise UIRequestError(
+            "This memory records statements, not dated exchanges. Edit the standing "
+            "document to add to it, or use set_memory_local / set_memory_global.",
+            status_code=409,
         )
-        queued = 0
-        if self.retrieval is not None:
-            queued = self.retrieval.maintain(directory, written)
-        return {
-            "status": "saved",
-            "scope": scope,
-            "written": str(written),
-            "round_count": count_rounds(directory),
-            "units_queued": queued,
-        }
 
     async def memory_standing_save(
         self, arguments: Mapping[str, Any]

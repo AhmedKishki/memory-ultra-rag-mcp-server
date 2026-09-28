@@ -308,8 +308,14 @@ class LocalReranker:
             return []
         runtime = self._runtime_for_read()
         try:
-            pairs = [[query, candidate] for candidate in candidates]
-            return [float(value) for value in runtime.rerank(pairs)]  # type: ignore[attr-defined]
+            # The runtime takes the query once and the documents beside it, and
+            # returns one score per document in the order they were given.
+            return [
+                float(value)
+                for value in runtime.rerank(  # type: ignore[attr-defined]
+                    query, list(candidates)
+                )
+            ]
         except Exception as error:
             raise ModelError(f"{self._spec.name} failed to score: {error}") from error
 

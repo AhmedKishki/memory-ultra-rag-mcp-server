@@ -21,7 +21,6 @@ from fastmcp.exceptions import ToolError
 from memory_ultra_rag_mcp import server
 from memory_ultra_rag_mcp.config import resolve_config
 from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
-from memory_ultra_rag_mcp.store import append_round
 from memory_ultra_rag_mcp.vectors import vector_path
 
 
@@ -89,7 +88,8 @@ def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
         async with Client(app) as client:
             return _data(
                 await client.call_tool(
-                    "set_memory_local", {"content": "The draft lives in docs/"}
+                    "set_memory_local",
+                    {"content": "The draft lives in docs/", "type": "note"},
                 )
             )
 
@@ -98,8 +98,9 @@ def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
     assert recorded["standing_document"] == str(config.local_directory / "MEMORY.md")
     standing = (config.local_directory / "MEMORY.md").read_text(encoding="utf-8")
     assert "The draft lives in docs/" in standing
-    # A statement is not an exchange, so it writes no dated round.
+    # A scope is one document: no dated directory, and no second Markdown file.
     assert not (config.local_directory / "project").exists()
+    assert [p.name for p in config.local_directory.glob("*.md")] == ["MEMORY.md"]
     # The write is durable and the vector is queued, not computed on this thread.
     assert recorded["embedded"] is False
     assert recorded["units_queued"] == 1
@@ -117,7 +118,9 @@ def test_a_statement_is_embedded_off_the_calling_thread(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             recorded = _data(
-                await client.call_tool("set_memory_local", {"content": "a fact"})
+                await client.call_tool(
+                    "set_memory_local", {"content": "a fact", "type": "note"}
+                )
             )
             # The work happens on the worker; a read reports what it has caught.
             drained = all(
@@ -130,7 +133,7 @@ def test_a_statement_is_embedded_off_the_calling_thread(tmp_path: Path) -> None:
 
     outcome = asyncio.run(scenario())
     assert outcome["drained"] is True
-    assert "a fact" in embedder.documents
+    assert "NOTE: a fact" in embedder.documents
     assert outcome["read"]["units_pending"] == 0
 
 
@@ -145,7 +148,9 @@ def test_a_write_survives_a_model_that_cannot_be_loaded(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             recorded = _data(
-                await client.call_tool("set_memory_local", {"content": "a fact"})
+                await client.call_tool(
+                    "set_memory_local", {"content": "a fact", "type": "note"}
+                )
             )
             drained = _engine(config, embedder)
             return recorded | {
@@ -168,7 +173,8 @@ def test_a_global_statement_is_written_under_the_storage_root(tmp_path: Path) ->
         async with Client(app) as client:
             recorded = _data(
                 await client.call_tool(
-                    "set_memory_global", {"content": "always cite the commit"}
+                    "set_memory_global",
+                    {"content": "always cite the commit", "type": "rule"},
                 )
             )
             read = _data(await client.call_tool("get_memory_global", {"query": "cite"}))
@@ -192,15 +198,18 @@ def test_a_read_answers_a_question_not_a_file(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local", {"content": "docs/ has the draft"}
+                "set_memory_local", {"content": "docs/ has the draft", "type": "note"}
             )
-            await client.call_tool("set_memory_local", {"content": "tests run with uv"})
+            await client.call_tool(
+                "set_memory_local", {"content": "tests run with uv", "type": "note"}
+            )
             for line, answer in (
                 ("where is the draft", "in docs/"),
                 ("morning coffee", "tea"),
             ):
-                written = append_round(config.local_directory, [line], [answer])
-                engine.maintain(config.local_directory, written)
+                await client.call_tool(
+                    "set_memory_local", {"content": f"{line} {answer}", "type": "NOTE"}
+                )
             engine.worker_for(config.local_directory).drain(5.0)
             return _data(await client.call_tool("get_memory_local", {"query": "draft"}))
 
@@ -208,7 +217,7 @@ def test_a_read_answers_a_question_not_a_file(tmp_path: Path) -> None:
     assert read["scope"] == "local"
     assert {unit["text"] for unit in read["units"]} == {
         "docs/ has the draft",
-        "where is the draft\nin docs/",
+        "where is the draft in docs/",
     }
     answer = json.dumps(read)
     assert "tests run with uv" not in answer
@@ -231,7 +240,8 @@ def test_a_read_finds_a_statement_by_meaning_alone(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local", {"content": "the third draft lives in drafts/"}
+                "set_memory_local",
+                {"content": "the third draft lives in drafts/", "type": "note"},
             )
             engine.worker_for(config.local_directory).drain(5.0)
             return _data(
@@ -256,7 +266,8 @@ def test_a_read_that_needs_no_meaning_says_which_side_answered(tmp_path: Path) -
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local", {"content": "always cite the commit"}
+                "set_memory_local",
+                {"content": "always cite the commit", "type": "rule"},
             )
             engine.worker_for(config.local_directory).drain(5.0)
             return _data(await client.call_tool("get_memory_local", {"query": "cite"}))
@@ -276,7 +287,9 @@ def test_a_read_says_so_when_the_model_is_not_resident(tmp_path: Path) -> None:
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
-            await client.call_tool("set_memory_local", {"content": "a fact"})
+            await client.call_tool(
+                "set_memory_local", {"content": "a fact", "type": "note"}
+            )
             engine.worker_for(config.local_directory).drain(5.0)
             embedder._loaded = False
             return _data(await client.call_tool("get_memory_local", {"query": "fact"}))
@@ -296,10 +309,10 @@ def test_a_read_is_capped_and_says_so(tmp_path: Path) -> None:
     async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
         async with Client(app) as client:
             for index in range(5):
-                written = append_round(
-                    config.local_directory, [f"draft note {index}"], ["noted"]
+                await client.call_tool(
+                    "set_memory_local",
+                    {"content": f"draft note {index} noted", "type": "NOTE"},
                 )
-                engine.maintain(config.local_directory, written)
             engine.worker_for(config.local_directory).drain(5.0)
             return (
                 _data(await client.call_tool("get_memory_local", {"query": "draft"})),
@@ -340,7 +353,9 @@ def test_a_read_reports_when_the_index_is_behind(tmp_path: Path) -> None:
 
     async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
         async with Client(app) as client:
-            await client.call_tool("set_memory_local", {"content": "a fact"})
+            await client.call_tool(
+                "set_memory_local", {"content": "a fact", "type": "note"}
+            )
             engine.worker_for(config.local_directory).drain(5.0)
             fresh = _data(await client.call_tool("get_memory_local", {"query": "fact"}))
             standing = config.local_directory / "MEMORY.md"
@@ -398,7 +413,9 @@ def test_a_project_read_cannot_see_another_projects_memory(tmp_path: Path) -> No
     async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
         embedder = FakeEmbedder()
         async with Client(_app(first, embedder)) as client:
-            await client.call_tool("set_memory_local", {"content": "first only"})
+            await client.call_tool(
+                "set_memory_local", {"content": "first only", "type": "note"}
+            )
             _engine(first, embedder).worker_for(first.local_directory).drain(5.0)
         async with Client(_app(second, embedder)) as client:
             read = _data(await client.call_tool("get_memory_local", {"query": "first"}))
@@ -427,7 +444,59 @@ def test_the_global_tools_take_no_user(tmp_path: Path) -> None:
 
     get_parameters, set_parameters = asyncio.run(scenario())
     assert get_parameters == {"query", "limit"}
-    assert set_parameters == {"content"}
+    # The setters take the statement's category; the readers take no type, because
+    # a read answers with the statement rather than with the label it was filed under.
+    assert set_parameters == {"content", "type"}
+
+
+def test_a_type_is_required_and_a_bad_one_is_refused(tmp_path: Path) -> None:
+    app = _app(_config(tmp_path), FakeEmbedder())
+
+    async def scenario() -> None:
+        async with Client(app) as client:
+            tools = {tool.name: tool for tool in await client.list_tools()}
+            for name in ("set_memory_local", "set_memory_global"):
+                required = set(tools[name].inputSchema["required"])
+                assert "type" in required
+            with pytest.raises(ToolError):
+                await client.call_tool(
+                    "set_memory_local", {"content": "a fact"}, raise_on_error=True
+                )
+
+    asyncio.run(scenario())
+
+
+def test_a_read_does_not_return_the_type_a_statement_was_filed_under(
+    tmp_path: Path,
+) -> None:
+    """The label is recorded and searchable, and the answer is the statement."""
+
+    config = _config(tmp_path)
+    app = _app(config, FakeEmbedder())
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "set_memory_local",
+                {"content": "the draft lives in drafts/", "type": "convention"},
+            )
+            by_statement = _data(
+                await client.call_tool("get_memory_local", {"query": "drafts"})
+            )
+            # A query naming the category finds it, which is what indexing the type buys.
+            by_type = _data(
+                await client.call_tool("get_memory_local", {"query": "convention"})
+            )
+        return {"by_statement": by_statement, "by_type": by_type}
+
+    answered = asyncio.run(scenario())
+    assert [unit["text"] for unit in answered["by_statement"]["units"]] == [
+        "the draft lives in drafts/"
+    ]
+    # The label is in the record and not in the answer, by either route.
+    assert "CONVENTION:" not in str(answered["by_statement"])
+    assert "CONVENTION:" not in str(answered["by_type"])
+    assert answered["by_type"]["units"], "a query for the type should find it"
 
 
 def test_an_empty_statement_is_refused(tmp_path: Path) -> None:
@@ -435,14 +504,16 @@ def test_an_empty_statement_is_refused(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         async with Client(app) as client:
-            await client.call_tool("set_memory_local", {"content": "   "})
+            await client.call_tool(
+                "set_memory_local", {"content": "   ", "type": "note"}
+            )
 
     with pytest.raises(ToolError, match="content must not be empty"):
         asyncio.run(scenario())
 
 
 def test_a_reranker_orders_the_answer_when_it_is_switched_on(tmp_path: Path) -> None:
-    """Off by default, and when on it decides the order it reports."""
+    """On by default, and when it runs it decides the order it reports."""
 
     config = _config(tmp_path)
     embedder = FakeEmbedder()
@@ -452,11 +523,10 @@ def test_a_reranker_orders_the_answer_when_it_is_switched_on(tmp_path: Path) -> 
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
-            # A page write: through the store, then the write side's maintenance,
-            # which is what gives the round a vector.
             for line in ("the draft is a plan", "the draft lives in docs"):
-                written = append_round(config.local_directory, [line], ["noted"])
-                engine.maintain(config.local_directory, written)
+                await client.call_tool(
+                    "set_memory_local", {"content": line, "type": "NOTE"}
+                )
             engine.worker_for(config.local_directory).drain(5.0)
             return _data(
                 await client.call_tool("get_memory_local", {"query": "the draft docs"})
@@ -464,11 +534,11 @@ def test_a_reranker_orders_the_answer_when_it_is_switched_on(tmp_path: Path) -> 
 
     read = asyncio.run(scenario())
     assert read["reranked"] is True
-    # The words match both rounds, and the reranker's scores put the round
+    # The words match both statements, and the reranker's scores put the one
     # holding more of the query first. Ordering only: both still come back.
     assert [unit["text"] for unit in read["units"]] == [
-        "the draft lives in docs\nnoted",
-        "the draft is a plan\nnoted",
+        "the draft lives in docs",
+        "the draft is a plan",
     ]
 
 
@@ -497,7 +567,9 @@ def test_a_failing_model_is_reported_and_the_write_still_lands(tmp_path: Path) -
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             return _data(
-                await client.call_tool("set_memory_global", {"content": "a rule"})
+                await client.call_tool(
+                    "set_memory_global", {"content": "a rule", "type": "rule"}
+                )
             )
 
     recorded = asyncio.run(scenario())

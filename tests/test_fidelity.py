@@ -1,26 +1,23 @@
-"""This package writes what UltraRAG's own server writes.
+"""This package writes the standing document UltraRAG's own server writes.
 
-Both fixtures were captured from `servers/memory/src/memory.py` at the pinned
+The fixture was captured from `servers/memory/src/memory.py` at the pinned
 revision; see `tests/fixtures/upstream/README.md` for how. The comparison is
 byte-for-byte, so the format cannot drift without failing here.
+
+The same revision also keeps a dated exchange log beside that document, captured
+as `daily_round.md`. This package does not write one: a memory here is a set of
+statements, and anything worth keeping is recorded as one. That is a deliberate
+divergence from upstream and it is recorded in the README's choice table, which
+is why this file compares one format rather than two.
 """
 
 from __future__ import annotations
 
-import re
-from datetime import datetime
 from pathlib import Path
 
-from memory_ultra_rag_mcp.store import TEMPLATE, append_round, read_standing
+from memory_ultra_rag_mcp.store import TEMPLATE, read_standing, standing_document
 
 FIXTURES = Path(__file__).parent / "fixtures" / "upstream"
-MOMENT = datetime.fromisoformat("2026-09-22T14:48:30")
-TIMESTAMP = re.compile(r"^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", re.MULTILINE)
-
-
-def _normalize(text: str) -> str:
-    """Replace the round's timestamp, which is written when it is written."""
-    return TIMESTAMP.sub("## <timestamp>", text)
 
 
 def test_the_template_is_upstreams(tmp_path: Path) -> None:
@@ -29,26 +26,24 @@ def test_the_template_is_upstreams(tmp_path: Path) -> None:
     assert read_standing(tmp_path / "scope") == upstream
 
 
-def test_a_written_round_matches_upstreams_bytes(tmp_path: Path) -> None:
-    upstream = (FIXTURES / "daily_round.md").read_text(encoding="utf-8")
-    written = append_round(
-        tmp_path / "scope",
-        ["What do you remember about me?"],
-        ["Only what you asked me to keep."],
-        now=MOMENT,
-    )
+def test_the_standing_document_is_named_as_upstream_names_it(
+    tmp_path: Path,
+) -> None:
+    """Upstream's own file name, kept: MEMORY.md, in the scope directory."""
 
-    assert _normalize(written.read_text(encoding="utf-8")) == _normalize(upstream)
+    scope = tmp_path / "scope"
+    read_standing(scope)
+    assert standing_document(scope).name == "MEMORY.md"
+    assert standing_document(scope).parent == scope
 
 
-def test_the_day_header_matches_upstreams_bytes(tmp_path: Path) -> None:
-    upstream_first_line = (
-        (FIXTURES / "daily_round.md").read_text(encoding="utf-8").splitlines()[0]
-    )
-    written = append_round(
-        tmp_path / "scope",
-        ["question"],
-        ["answer"],
-        now=MOMENT,
-    )
-    assert written.read_text(encoding="utf-8").splitlines()[0] == upstream_first_line
+def test_a_scope_is_one_document_and_nothing_else(tmp_path: Path) -> None:
+    """No dated directory is created, and none is looked for."""
+
+    from memory_ultra_rag_mcp.store import append_statement
+
+    scope = tmp_path / "scope"
+    append_statement(scope, "a fact", statement_type="NOTE")
+    assert [path.name for path in sorted(scope.rglob("*"))] == [
+        "MEMORY.md",
+    ]

@@ -17,13 +17,13 @@ read by every project on it. It holds who the user is, what they want remembered
 everywhere, and the durable rules that apply wherever they work:
 
 - get_memory_global(query) recalls from it.
-- set_memory_global(content) records one statement in it.
+- set_memory_global(content, type) records one typed statement in it.
 
 Local memory — one per project, kept inside the repository this server is bound
 to, under .memory-rag. It holds what is true here:
 
 - get_memory_local(query) recalls from it.
-- set_memory_local(content) records one statement in it.
+- set_memory_local(content, type) records one typed statement in it.
 
 How to use them:
 
@@ -58,6 +58,14 @@ How to use them:
    statement is safe in the file, and `units_queued` says how many statements are
    still waiting to be embedded; a read taken immediately may not yet find a
    statement by meaning, though it will by its words.
-6. What memory returns is the record of what was remembered, quote it as the user's
+6. Every statement is filed under a type you name. Pick the category yourself and
+   reuse it, so the same kind of thing is filed the same way — 'rule' for an
+   instruction you were given, 'plan' for what a project is meant to be, 'preference'
+   for what someone likes, 'correction' for something they told you to stop doing.
+   The server defines no categories and interprets none: the type is recorded with
+   the statement, is searchable, and is not repeated when the statement is recalled,
+   so a read answers with the statement itself. Reusing a type you already used
+   matters, because it is what makes a query for that kind of thing find them.
+7. What memory returns is the record of what was remembered, quote it as the user's
    own words, and let the user decide which write matters when two disagree.
 """

@@ -35,7 +35,6 @@ from typing import Self
 from .store import (
     TEMPLATE,
     StoreError,
-    daily_rounds,
     query_terms,
     standing_document,
 )
@@ -120,24 +119,6 @@ def _statement_units(text: str, source: str) -> list[tuple[str, str, str, str]]:
         # something anyone wrote, so it is not indexed and cannot answer a query.
         if statement and statement != TEMPLATE.strip():
             units.append((statement, "statement", source, f"{ordinal}"))
-    return units
-
-
-def _round_units(text: str, source: str) -> list[tuple[str, str, str, str]]:
-    """Return one dated file's rounds as units, reusing the store's parser."""
-
-    from .store import _parse_rounds  # local import: the parser is the store's
-
-    units: list[tuple[str, str, str, str]] = []
-    for ordinal, entry in enumerate(_parse_rounds(text, source)):
-        body = entry.get("user", "").strip()
-        answer = entry.get("assistant", "").strip()
-        if answer:
-            body = f"{body}\n{answer}" if body else answer
-        if not body:
-            continue
-        stamp = f"{entry.get('date', '')} {entry.get('time', '')}".strip()
-        units.append((body, "round", source, f"{ordinal:04d} {stamp}"))
     return units
 
 
@@ -303,13 +284,15 @@ class MemoryIndex:
         return found
 
     def sources(self) -> list[Path]:
-        """Return the files this scope is made of, in a stable order."""
+        """Return the files this scope is made of, in a stable order.
 
-        files = [standing_document(self.scope_directory)]
-        rounds = daily_rounds(self.scope_directory)
-        if rounds.is_dir():
-            files.extend(sorted(rounds.glob("*.md")))
-        return [path for path in files if path.is_file()]
+        A scope is one standing document now, so this is one path. It stays a
+        list because the index's contract is a set of files, and because a file
+        that is not there yet is not an error.
+        """
+
+        standing = standing_document(self.scope_directory)
+        return [standing] if standing.is_file() else []
 
     def sync(self) -> dict[str, int]:
         """Re-read whatever changed across the scope, and report what is held.
@@ -325,8 +308,7 @@ class MemoryIndex:
         """Re-read one file of this scope, and report what the index holds.
 
         This is the write path's half of keeping the index in step, and its work
-        is proportional to one file: a statement lands in the standing document,
-        an exchange in one dated file. Neither touches the rest of the memory.
+        is proportional to that one file, never to the memory.
         """
 
         return self._sync([path], whole_scope=False)
@@ -370,12 +352,10 @@ class MemoryIndex:
                 continue
             if previous is not None and previous[2] == head and size > previous[0]:
                 added = path.read_text(encoding="utf-8")[previous[0] :]
-                units = self._units_for(name, added, appended=True)
+                units = _statement_units(added, name)
             else:
                 connection.execute("DELETE FROM unit WHERE source = ?", (name,))
-                units = self._units_for(
-                    name, path.read_text(encoding="utf-8"), appended=False
-                )
+                units = _statement_units(path.read_text(encoding="utf-8"), name)
             connection.executemany(
                 "INSERT INTO unit(text, unit_key, kind, source, stamp) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -394,20 +374,6 @@ class MemoryIndex:
         connection.commit()
         total = int(connection.execute("SELECT count(*) FROM unit").fetchone()[0])
         return {"indexed": indexed, "units": total, "files": len(present)}
-
-    def _units_for(
-        self,
-        name: str,
-        text: str,
-        *,
-        appended: bool,
-    ) -> list[tuple[str, str, str, str]]:
-        """Return the units in one file's text, whole or appended-to."""
-
-        del appended  # the caller has already decided what text it is holding
-        if name == standing_document(self.scope_directory).name:
-            return _statement_units(text, name)
-        return _round_units(text, name)
 
     # -- searching ---------------------------------------------------------
 

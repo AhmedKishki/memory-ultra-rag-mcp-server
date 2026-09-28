@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 from memory_ultra_rag_mcp import ui
 from memory_ultra_rag_mcp.config import ServerConfig, resolve_config
 from memory_ultra_rag_mcp.server import create_server
-from memory_ultra_rag_mcp.store import append_round, list_rounds, read_standing
+from memory_ultra_rag_mcp.store import read_standing
 
 
 def _config(tmp_path: Path) -> ServerConfig:
@@ -45,32 +45,29 @@ def test_the_view_reports_the_two_scopes(tmp_path: Path) -> None:
     assert scopes[1]["directory"] == str(config.global_directory)
 
 
-def test_rounds_are_read_newest_first_and_limited(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    for index in range(3):
-        append_round(config.local_directory, [f"question {index}"], ["answer"])
+def test_the_rounds_action_answers_empty_because_there_are_no_rounds(
+    tmp_path: Path,
+) -> None:
+    """The shared page asks for rounds under the memory capability.
 
-    async def scenario() -> tuple[dict, dict]:
+    An action that refused would take the whole memory view down with it, so the
+    adapter answers the request it is given. An empty list is the true answer for a
+    memory of statements, and the page's own wording is what says otherwise.
+    """
+
+    config = _config(tmp_path)
+
+    async def scenario() -> dict:
         async with Client(create_server(config)) as client:
             adapter = ui.MemoryUIAdapter(config, client)
-            everything = await adapter.call("memory_rounds", {"scope": "local"})
-            limited = await adapter.call(
-                "memory_rounds", {"scope": "local", "limit": 2}
-            )
-            return everything, limited
+            return await adapter.call("memory_rounds", {"scope": "local"})
 
-    everything, limited = asyncio.run(scenario())
-    assert everything["round_count"] == 3
-    assert everything["truncated"] is False
-    assert [entry["user"] for entry in everything["rounds"]] == [
-        "question 2",
-        "question 1",
-        "question 0",
-    ]
-    assert limited["truncated"] is True
-    assert len(limited["rounds"]) == 2
-    assert limited["rounds"][0]["user"] == "question 2"
-    assert limited["rounds"][0]["source_file"].endswith(".md")
+    answered = asyncio.run(scenario())
+    assert answered["rounds"] == []
+    assert answered["round_count"] == 0
+    assert answered["truncated"] is False
+    # Asking still brings the scope into being, exactly as a read does.
+    assert read_standing(config.local_directory).startswith("# MEMORY")
 
 
 def test_an_unknown_scope_is_refused(tmp_path: Path) -> None:
@@ -95,35 +92,28 @@ def test_an_unknown_scope_is_refused(tmp_path: Path) -> None:
     assert asyncio.run(scenario()) == [400, 404, 404, 404, 404]
 
 
-def test_writing_a_round_goes_through_the_tool(tmp_path: Path) -> None:
+def test_writing_a_round_is_refused_because_there_are_no_rounds(
+    tmp_path: Path,
+) -> None:
+    """A statement is recorded through a tool; the page's one write is the document."""
+
     config = _config(tmp_path)
 
-    async def scenario() -> dict:
+    async def scenario() -> int:
         async with Client(create_server(config)) as client:
             adapter = ui.MemoryUIAdapter(config, client)
-            return await adapter.call(
-                "memory_append",
-                {
-                    "scope": "global",
-                    "user_message": "Where does the draft live?",
-                    "assistant_message": "In the project directory.",
-                },
-            )
+            with pytest.raises(ui.UIRequestError) as failure:
+                await adapter.call(
+                    "memory_append",
+                    {
+                        "scope": "global",
+                        "user_message": "Where does the draft live?",
+                        "assistant_message": "In the project directory.",
+                    },
+                )
+            return failure.value.status_code
 
-    saved = asyncio.run(scenario())
-
-    assert saved["status"] == "saved"
-    assert saved["scope"] == "global"
-    assert saved["round_count"] == 1
-    daily = config.global_directory / "project"
-    written = min(daily.glob("*.md"))
-    assert saved["written"] == str(written)
-    assert "- user: Where does the draft live?" in written.read_text(encoding="utf-8")
-    # The round the page wrote is read back by the same parser the view serves, so
-    # a write from the browser is in the format the agent's tools produce.
-    rounds, _ = list_rounds(config.global_directory)
-    assert rounds[0]["user"] == "Where does the draft live?"
-    assert rounds[0]["assistant"] == "In the project directory."
+    assert asyncio.run(scenario()) == 409
 
 
 def test_the_standing_document_is_written_only_when_it_still_matches(
@@ -247,7 +237,8 @@ def test_the_routes_serve_the_view(tmp_path: Path) -> None:
     assert [entry["scope"] for entry in status["scopes"]] == ["local", "global"]
     assert rounds["rounds"] == []
     assert standing["content"].startswith("# MEMORY")
-    assert appended.json()["round_count"] == 1
+    # The page's round write is refused; the document write is the one it has.
+    assert appended.status_code == 409
     assert saved.json()["status"] == "saved"
     assert (config.local_directory / "MEMORY.md").read_text(encoding="utf-8") == (
         "# MEMORY\nKept for the thesis.\n"

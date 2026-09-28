@@ -10,9 +10,9 @@ where they live and therefore who can see them.
   that repository, under ``.memory-rag``, so it travels with the project.
 
 The surface is four tools, named by what they do and which kind they touch, so the
-only decision an agent makes is whether a memory is this project's or this user's.
-No tool returns a whole memory: a read takes a query, answers it from the standing
-document and the dated rounds, and reports what it searched, because a memory that
+only decision an agent makes is whether a memory is this project's or this
+account's. No tool returns a whole memory: a read takes a query, answers it from
+the statements that match, and reports what it searched, because a memory that
 grows by appending cannot be handed to a model whole without spending the context
 window on it.
 """
@@ -57,7 +57,7 @@ SERVER_NAME = "memory-ultra-rag-mcp"
 #: The environment variable that turns the browser view on for every start.
 UI_PORT_ENV_VAR = "MEMORY_ULTRARAG_UI_PORT"
 
-#: How many dated rounds one read may return. A memory grows by appending, so a read
+#: How many statements one read may return. A memory grows by appending, so a read
 #: is capped and says so; the cap is a parameter so a caller that needs more can
 #: ask for more deliberately.
 DEFAULT_RESULT_LIMIT = 10
@@ -73,14 +73,27 @@ ContentParameter = Annotated[
         )
     ),
 ]
+TypeParameter = Annotated[
+    str,
+    Field(
+        description=(
+            "The category this statement is filed under, as one run of block "
+            "letters with no white space: 'RULE', 'PLAN', 'PREFERENCE'. This "
+            "server defines no categories and interprets none — the label is "
+            "recorded with the statement, is searchable, and is not returned when "
+            "the statement is recalled. It is written in block letters whichever "
+            "case you send it in."
+        )
+    ),
+]
 QueryParameter = Annotated[
     str,
     Field(
         description=(
-            "What to recall, as words. The standing document's statements and the "
-            "dated rounds are searched for these words, and only what matched is "
-            "returned. Required: this server answers a question rather than "
-            "returning a memory whole, and no tool can return a file."
+            "What to recall, as words. This project's statements are searched for "
+            "those words and for their meaning, and only what matched is returned. "
+            "Required: this server answers a question rather than returning a "
+            "memory whole, and no tool can return a file."
         )
     ),
 ]
@@ -88,9 +101,9 @@ LimitParameter = Annotated[
     int,
     Field(
         description=(
-            "How many matched statements and rounds to return, at most "
-            f"{MAX_RESULT_LIMIT}. Raising this raises the cap on matches, never "
-            "the amount of a file that is read."
+            f"How many matched statements to return, at most {MAX_RESULT_LIMIT}. "
+            "Raising this raises the cap on matches, never the amount of a file "
+            "that is read."
         )
     ),
 ]
@@ -167,28 +180,38 @@ def create_server(
     )
 
     @server.tool(name="set_memory_global", annotations=WRITE_ANNOTATIONS)
-    def set_memory_global(content: ContentParameter) -> dict[str, Any]:
-        """Remember one statement that applies everywhere this account works.
+    def set_memory_global(
+        content: ContentParameter, type: TypeParameter
+    ) -> dict[str, Any]:
+        """Remember one typed statement that applies everywhere this account works.
 
         Use it for what is true of the user, and for a standing instruction they
         gave: those belong in every project, so they go here and nowhere else. The
         statement is appended to the standing document in global memory, which the
         user and the browser view can edit. There is one global memory, so there is
         nothing to name and nothing to choose.
+
+        `type` is the category you file the statement under: one run of block letters.
+        This server defines no categories and interprets none.
         """
         directory = config.global_directory
-        return _recorded(engine, "global", directory, content)
+        return _recorded(engine, "global", directory, content, type)
 
     @server.tool(name="set_memory_local", annotations=WRITE_ANNOTATIONS)
-    def set_memory_local(content: ContentParameter) -> dict[str, Any]:
-        """Remember one statement for this project only.
+    def set_memory_local(
+        content: ContentParameter, type: TypeParameter
+    ) -> dict[str, Any]:
+        """Remember one typed statement for this project only.
 
         Use it for what is true here — a decision, a path, a convention, where
         something lives — and not for anything the user said applies everywhere.
         The statement is appended to this project's standing document, inside the
         repository under `.memory-rag`, so it travels with the project.
+
+        `type` is the category you file the statement under: one run of block letters.
+        This server defines no categories and interprets none.
         """
-        return _recorded(engine, "local", config.local_directory, content)
+        return _recorded(engine, "local", config.local_directory, content, type)
 
     @server.tool(name="get_memory_global", annotations=READ_ONLY_ANNOTATIONS)
     def get_memory_global(
@@ -197,9 +220,9 @@ def create_server(
     ) -> dict[str, Any]:
         """Recall what applies everywhere this account works.
 
-        Answer it from the global memory's standing document and the dated rounds
-        that match the query. This is the account's one global memory, shared by
-        every project on this storage root.
+        Answer it from the statements in the account's global memory that match
+        the query. This is the account's one global memory, shared by every
+        project on this storage root.
         """
         return _answer(engine, "global", config.global_directory, query, limit)
 
@@ -210,10 +233,9 @@ def create_server(
     ) -> dict[str, Any]:
         """Recall what is true about this project.
 
-        Answer it from this project's standing document, which is returned whole
-        because it is small and curated, plus the dated rounds that match the
-        query, newest first. Nothing outside this repository is read, and no other
-        project's memory is reachable from here.
+        Answer it from the statements in this project's memory that match the
+        query, nearest first. Nothing outside this repository is read, and no
+        other project's memory is reachable from here.
         """
         return _answer(engine, "local", config.local_directory, query, limit)
 
@@ -225,8 +247,9 @@ def _recorded(
     scope: str,
     directory: Path,
     content: str,
+    statement_type: str,
 ) -> dict[str, Any]:
-    """Record one statement, reporting what the semantic side has queued for it.
+    """Record one typed statement, reporting what the semantic side has queued.
 
     The statement is durable before this returns, and the vector is queued rather
     than computed here, so a write costs one append and no inference. A model
@@ -236,7 +259,7 @@ def _recorded(
 
     del scope
     try:
-        return engine.record(directory, content)
+        return engine.record(directory, content, statement_type)
     except ModelError as error:
         raise ToolError(str(error)) from error
 

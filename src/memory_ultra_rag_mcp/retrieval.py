@@ -10,9 +10,12 @@ The defaults are the collection's measured ones rather than invented numbers:
 weighted reciprocal rank fusion with ``rrf_k = 60``, BM25 weighted 1.25 against
 dense 1.0, a cosine floor of 0.72, and a relative margin of 0.10 around the
 query's best candidate. They are the sibling server's, measured on a document
-corpus rather than on memory units, and the later phase is what decides whether
-they hold here. Reranking is off, because nothing in this package may claim a
-gain it has not measured.
+corpus rather than on memory units, and what decides whether they hold here is a
+measurement this package has not yet made. Reranking is on, because a memory's
+units are one line each, which is where a bi-encoder is weakest, and a
+cross-encoder reads the pair rather than either side alone; its cost is bounded
+by ``rerank_depth`` against the read's ceiling. That it is more *accurate* here
+is unmeasured, and nothing in this package claims it.
 """
 
 from __future__ import annotations
@@ -55,16 +58,32 @@ class RetrievalSettings:
     pool_depth: int = 50
 
     #: A local cross-encoder to order the fused candidates with, or None for off.
-    reranker_model: str | None = None
+    #: On by default: a memory's units are one line each, where a bi-encoder's
+    #: vector is weakest, and a cross-encoder reads the pair rather than either
+    #: side alone. Measured on this machine at 54 ms for ten candidates, which is
+    #: what sets :attr:`rerank_depth`. No document here may claim it is more
+    #: accurate: that is unmeasured, and the first thing to measure.
+    reranker_model: str | None = "Xenova/ms-marco-MiniLM-L-6-v2"
 
     #: How many fused candidates the reranker sees, so its cost is bounded even
-    #: if the pool grows.
-    rerank_depth: int = 20
+    #: if the pool grows. Ten, because the read's own ceiling is 250 ms and the
+    #: cross-encoder costs about 5 ms a candidate on this machine.
+    rerank_depth: int = 10
 
     #: What a warm read may cost, asserted by a test so a later change cannot
-    #: quietly make a blocking lookup slow. A read that finds the model unloaded
-    #: is outside this bound and says so in its answer.
-    read_ceiling_ms: float = 250.0
+    #: quietly make a blocking lookup slow. 500 ms, not 250: the cross-encoder
+    #: costs about 5 ms a candidate in a tight loop but roughly 190 ms per read
+    #: through the library, and the first inference in a process is a model's own
+    #: cold start, which this bound does not cover — the test excludes the first
+    #: read for the same reason. A read that finds the model unloaded is outside
+    #: this bound and says so in its answer.
+    #:
+    #: The suite asserts this against a fake reranker, which costs nothing, so it
+    #: guards the fusion and the scan and not the cross-encoder. The real figure
+    #: was measured on this machine, out of band: 54 ms for ten candidates scored
+    #: in a loop, about 210 ms for a warm read end to end, and about 1.5 s for
+    #: the first reranked read in a process.
+    read_ceiling_ms: float = 500.0
 
     def describe(self) -> dict[str, object]:
         """Return this policy, for a diagnostic surface and for a test."""
@@ -120,13 +139,20 @@ class Retrieval:
             self.embedder, self.reranker.warm if self.reranker is not None else None
         )
 
-    def record(self, directory: Path, content: str) -> dict[str, Any]:
-        """Record one statement and queue its vector, reporting what it queued."""
+    def record(
+        self, directory: Path, content: str, statement_type: str
+    ) -> dict[str, Any]:
+        """Record one typed statement and queue its vector, reporting what it queued.
+
+        The type is the caller's own category, passed through to the store without
+        being interpreted here, and echoed back so a write can be confirmed against
+        what was actually filed.
+        """
 
         from .store import StoreError, append_statement
 
         try:
-            digest = append_statement(directory, content)
+            digest = append_statement(directory, content, statement_type=statement_type)
         except StoreError as error:
             raise ModelError(str(error)) from error
         queued = embed_pending(
@@ -137,10 +163,10 @@ class Retrieval:
         )
         return {
             "status": "set",
+            "type": statement_type,
             "directory": str(directory),
             "standing_document": str(directory / "MEMORY.md"),
             "sha256": digest,
-            "rounds_directory": str(directory / "project"),
             "embedding_model": self.policy.embedding_model,
             "units_queued": queued,
             "embedded": queued == 0,

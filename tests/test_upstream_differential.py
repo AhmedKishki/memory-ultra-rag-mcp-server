@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,7 +25,7 @@ from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 
 from memory_ultra_rag_mcp.config import global_memory_root, resolve_config
-from memory_ultra_rag_mcp.store import append_round, read_standing
+from memory_ultra_rag_mcp.store import read_standing
 
 pytestmark = pytest.mark.upstream
 
@@ -38,9 +37,10 @@ pytestmark = pytest.mark.upstream
 USER_ID = "default"
 QUESTION = "Where does the draft live?"
 STATEMENT = "The draft lives in the project directory."
+#: The type this side records a statement under. Upstream has no such parameter,
+#: so this is a deliberate divergence, recorded in the README's choice table.
+STATEMENT_TYPE = "NOTE"
 ANSWER = "In the project directory."
-
-STAMP = re.compile(r"^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", re.MULTILINE)
 
 
 def _checkout() -> tuple[Path, Path] | None:
@@ -165,12 +165,13 @@ async def _exercise_ours(
     async with Client(transport, init_timeout=120) as client:
         tools = sorted(tool.name for tool in await client.list_tools())
         await client.call_tool(
-            "set_memory_global", {"content": STATEMENT}, raise_on_error=True
+            "set_memory_global",
+            {"content": STATEMENT, "type": STATEMENT_TYPE},
+            raise_on_error=True,
         )
         await client.call_tool(
             "get_memory_global", {"query": STATEMENT}, raise_on_error=True
         )
-    append_round(global_memory_root(storage) / USER_ID, [QUESTION], [ANSWER])
     async with Client(transport, init_timeout=120) as client:
         read = _data(await client.call_tool("get_memory_global", {"query": STATEMENT}))
         fresh = _data(await client.call_tool("get_memory_global", {"query": "MEMORY"}))
@@ -195,7 +196,12 @@ def _fresh_storage(tmp_path: Path, name: str) -> Path:
 
 
 def _written(storage: Path) -> tuple[bytes, dict[str, bytes]]:
-    """Return a user's standing document and daily rounds from one storage root."""
+    """Return a user's standing document and daily rounds from one storage root.
+
+    Upstream writes both; this side writes the standing document and nothing
+    beside it, which is the divergence the choice table records. The rounds are
+    still read here so the comparison can say which side has them.
+    """
     user = global_memory_root(storage) / USER_ID
     standing = (user / "MEMORY.md").read_bytes()
     rounds = {
@@ -232,17 +238,20 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     fresh_ours = _written(_fresh_storage(tmp_path, "fresh-ours"))
     assert fresh_ours == fresh_upstream
 
-    # The store itself: the same template, then this side's statement appended in
-    # that same format, and the same round, byte for byte.
-    upstream_standing, upstream_rounds = _written(upstream_storage)
+    # The store itself: the same template, then this side's labelled statement
+    # appended below it. Upstream never writes a statement, so the only standing
+    # document the two sides can be asked to agree on byte for byte is a fresh
+    # one, asserted above; what is asserted here is that the label prefix is the
+    # only difference this side introduces.
+    upstream_standing, _upstream_rounds = _written(upstream_storage)
     our_standing, our_rounds = _written(our_storage)
     assert our_standing.decode().startswith(upstream_standing.decode())
-    assert our_standing.decode().endswith(f"\n{STATEMENT}\n")
-    assert sorted(our_rounds) == sorted(upstream_rounds)
-    for name, upstream_bytes in upstream_rounds.items():
-        ours = STAMP.sub("## <timestamp>", our_rounds[name].decode("utf-8"))
-        theirs = STAMP.sub("## <timestamp>", upstream_bytes.decode("utf-8"))
-        assert ours == theirs
+    assert our_standing.decode().removeprefix(upstream_standing.decode()) == (
+        f"\n{STATEMENT_TYPE}: {STATEMENT}\n"
+    )
+    # Upstream also keeps a dated exchange log, and this side keeps none: the
+    # divergence the choice table records, asserted here so it cannot drift.
+    assert our_rounds == {}
 
     # The read: the same standing document comes back, by a deliberately different
     # route. Upstream returns the whole file under one key; this side returns the
@@ -254,8 +263,10 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     }
     assert our_read["scope"] == "global"
     # A statement this side recorded comes back as the unit it is, from the same
-    # file upstream would have written it into.
+    # file upstream would have written it into, and without the type line it was
+    # filed under: the label is recorded, and a read answers with the statement.
     assert [unit["text"] for unit in our_read["units"]] == [STATEMENT]
+    assert STATEMENT_TYPE not in str(our_read)
     assert our_read["units"][0]["source"] == "MEMORY.md"
     assert our_read["truncated"] is False
     # The template upstream seeds a fresh standing document with is a seed, not
@@ -294,7 +305,7 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
         name: set(schemas)
         for name, schemas in (
             ("get_memory_global", {"query", "limit"}),
-            ("set_memory_global", {"content"}),
+            ("set_memory_global", {"content", "type"}),
         )
     }
     assert "user_id" not in our_parameters["get_memory_global"]

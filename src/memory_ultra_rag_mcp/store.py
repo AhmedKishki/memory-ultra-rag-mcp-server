@@ -1,20 +1,20 @@
 """UltraRAG's memory behaviour, for one scope directory.
 
-The behaviour, the file names, and the byte-for-byte formats are UltraRAG's, from
-``servers/memory/src/memory.py`` at the pinned revision; the reference files are
-committed under ``tests/fixtures/upstream``. What this module changes is only
-where a scope's directory is: the caller decides that, which is what lets one
-project keep its memory inside its own repository while every instance shares
-the global one.
+The behaviour, the file name, and the byte-for-byte format of the standing
+document are UltraRAG's, from ``servers/memory/src/memory.py`` at the pinned
+revision; the reference file is committed under ``tests/fixtures/upstream``. What
+this module changes is only where a scope's directory is: the caller decides
+that, which is what lets one project keep its memory inside its own repository
+while every instance shares the global one.
 
-Upstream's own constants, kept verbatim:
+Upstream's own constant, kept verbatim: the standing document is ``MEMORY.md``,
+created from a template when it is first read.
 
-* the standing document is ``MEMORY.md``, created from a template when it is first
-  read;
-* a round is appended to ``project/<YYYY-MM-DD>.md``, which starts with a
-  ``# Project Memory <date>`` header;
-* each round is written as ``## <date> <time>`` followed by the user's line and
-  the assistant's line.
+Upstream also keeps a dated exchange log beside it, at
+``project/<YYYY-MM-DD>.md``. This package does not: a memory here is a set of
+statements, and when a statement is worth keeping it is recorded as one. Nothing
+in this module writes, reads, or looks for a dated file, and a scope is one
+``MEMORY.md`` and whatever the search side derives from it.
 """
 
 from __future__ import annotations
@@ -23,23 +23,21 @@ import hashlib
 import os
 import re
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
 __all__ = [
-    "EMPTY_MESSAGE_ERRORS",
+    "MAX_STATEMENT_TYPE_LENGTH",
+    "STATEMENT_LABEL_PATTERN",
+    "STATEMENT_LABEL_SEPARATOR",
+    "STOPWORDS",
     "TEMPLATE",
     "StoreError",
-    "append_round",
     "append_statement",
-    "count_rounds",
-    "daily_rounds",
-    "latest_round_date",
-    "list_rounds",
     "query_terms",
     "read_standing",
     "standing_digest",
     "standing_document",
+    "statement_label",
     "write_standing",
 ]
 
@@ -47,32 +45,28 @@ __all__ = [
 TEMPLATE = "# MEMORY\ni am jack. i like LLMs.\n"
 
 STANDING_FILENAME = "MEMORY.md"
-ROUNDS_DIRNAME = "project"
 
-#: The round heading upstream writes, which is also how a round is recognized.
-ROUND_HEADING_PATTERN = re.compile(r"^## (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$")
+#: Long enough for a word, short enough that a label cannot become a phrase.
+MAX_STATEMENT_TYPE_LENGTH = 64
 
-USER_LINE_PREFIX = "- user: "
-ASSISTANT_LINE_PREFIX = "- assistant: "
+#: What separates a statement's label from its text, on the block's first line.
+STATEMENT_LABEL_SEPARATOR = ": "
 
-EMPTY_MESSAGE_ERRORS = (
-    "user_message cannot be empty.",
-    "assistant_message cannot be empty.",
-)
+#: A recorded statement's label: one run of block letters, then the separator. The
+#: read path strips a label with this same pattern, so a label written is a label
+#: recognised — which is why the store admits no other shape. The separator is
+#: written literally because a colon and a space are not special in a pattern.
+STATEMENT_LABEL_PATTERN = re.compile(rf"^[A-Z]{{1,{MAX_STATEMENT_TYPE_LENGTH}}}: ")
 
 
 class StoreError(ValueError):
-    """Raised when a scope or a round cannot be written as upstream writes it."""
+    """Raised when a scope cannot be written the way this store writes one."""
 
 
 def standing_document(scope_directory: Path) -> Path:
     """Return the standing document of one scope."""
+
     return scope_directory / STANDING_FILENAME
-
-
-def daily_rounds(scope_directory: Path) -> Path:
-    """Return the directory holding one scope's dated rounds."""
-    return scope_directory / ROUNDS_DIRNAME
 
 
 def read_standing(scope_directory: Path) -> str:
@@ -88,13 +82,60 @@ def read_standing(scope_directory: Path) -> str:
     return document.read_text(encoding="utf-8")
 
 
-def append_statement(scope_directory: Path, content: str) -> str:
-    """Record one statement in a scope's standing document, and return its digest.
+def statement_label(value: str) -> str:
+    """Return one statement's label as it is written on the block's first line.
+
+    A label is the caller's own category for a statement, and it carries no meaning
+    here: the store holds it and never interprets it. It exists to help a read find
+    the statement, so it is one run of block letters and nothing else — no white
+    space, no punctuation, no digits. A single word is a category; a phrase would
+    put a sentence where a word belongs, and anything but letters would make the
+    boundary between label and statement unreadable.
+
+    Case is the one thing normalised rather than refused: a type given in any case
+    is recorded in block letters, so what the document holds is always the shape
+    the read side recognises.
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        raise StoreError("type must not be empty.")
+    if any(character.isspace() for character in raw):
+        raise StoreError(
+            "type must be one word with no white space in it: a type is a single "
+            "category, and a phrase would be part of the statement."
+        )
+    if not (raw.isascii() and raw.isalpha()):
+        raise StoreError(
+            "type must be block letters only, as in RULE or PLAN: a type carries "
+            "no meaning beyond helping a read find its statements."
+        )
+    if len(raw) > MAX_STATEMENT_TYPE_LENGTH:
+        raise StoreError(
+            f"type must be at most {MAX_STATEMENT_TYPE_LENGTH} characters: it "
+            f"named {len(raw)}."
+        )
+    return raw.upper()
+
+
+def append_statement(
+    scope_directory: Path,
+    content: str,
+    *,
+    statement_type: str,
+) -> str:
+    """Record one labelled statement in a scope's standing document, with its digest.
 
     A statement is a plain block of text appended to the curated document, with
     no speaker attached: it is what the caller chose to remember, not something
     the user said and not something an assistant replied. Upstream never writes
     this file, so the shape is this package's, inside upstream's file and format.
+
+    The block is the statement, prefixed by its own label and a colon. The label
+    is required, and it is the caller's: this store never checks what one means,
+    because the meaning is the caller's to define. It is recorded and not
+    returned — a read answers with the statement alone, so the label stays where
+    it was written, in the document a person can open.
 
     The append is a single ``O_APPEND`` write, so a concurrent writer adds its own
     block instead of losing either write. Nothing here replaces the document;
@@ -104,23 +145,192 @@ def append_statement(scope_directory: Path, content: str) -> str:
     statement = str(content or "").strip()
     if not statement:
         raise StoreError("content must not be empty.")
+    label = statement_label(statement_type)
 
     current = read_standing(scope_directory)
     document = standing_document(scope_directory)
     separator = (
         "" if current.endswith("\n\n") else ("\n" if current.endswith("\n") else "\n\n")
     )
+    block = f"{label}{STATEMENT_LABEL_SEPARATOR}{statement}"
     with document.open("a", encoding="utf-8") as handle:
-        handle.write(f"{separator}{statement}\n")
+        handle.write(f"{separator}{block}\n")
     return standing_digest(scope_directory) or ""
+
+
+#: The English words a lookup does not need. This memory is English, and the word
+#: side asks FTS5 for *every* query term at once, so a term that appears in no
+#: statement does not narrow the answer — it empties it, and the fallback then has
+#: to rescue the query by accident. That is the case for a query like "what is
+#: research-rag for": no statement contains "what", "is", "the" or "for", so the
+#: conjunction finds nothing and the two rarest words stand in for the whole query.
+#: Dropping them first leaves "research-rag", which is the query.
+#:
+#: This is the NLTK-derived, fuller list rather than the short one of thirty-three
+#: words, because the wh-words are the ones that hurt here: "what", "who" and "how"
+#: carry no signal for a memory of statements, yet the short list keeps them. It is
+#: written out here rather than imported, since this package takes no dependency to
+#: get a word list. Only the query is filtered; a statement keeps every word it was
+#: written with, because the words stored are the words that were remembered.
+STOPWORDS = frozenset(
+    [
+        "a",
+        "about",
+        "above",
+        "after",
+        "again",
+        "against",
+        "all",
+        "am",
+        "an",
+        "and",
+        "any",
+        "are",
+        "aren't",
+        "as",
+        "at",
+        "be",
+        "because",
+        "been",
+        "before",
+        "being",
+        "below",
+        "between",
+        "both",
+        "but",
+        "by",
+        "can",
+        "cannot",
+        "could",
+        "couldn't",
+        "did",
+        "didn't",
+        "do",
+        "does",
+        "doesn't",
+        "doing",
+        "don't",
+        "down",
+        "during",
+        "each",
+        "few",
+        "for",
+        "from",
+        "further",
+        "had",
+        "hadn't",
+        "has",
+        "hasn't",
+        "have",
+        "haven't",
+        "having",
+        "he",
+        "her",
+        "here",
+        "hers",
+        "herself",
+        "him",
+        "himself",
+        "his",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "isn't",
+        "it",
+        "its",
+        "itself",
+        "just",
+        "let's",
+        "me",
+        "more",
+        "most",
+        "mustn't",
+        "my",
+        "myself",
+        "no",
+        "nor",
+        "not",
+        "of",
+        "off",
+        "on",
+        "once",
+        "only",
+        "or",
+        "other",
+        "ought",
+        "our",
+        "ours",
+        "ourselves",
+        "out",
+        "over",
+        "own",
+        "same",
+        "shan't",
+        "she",
+        "should",
+        "shouldn't",
+        "so",
+        "some",
+        "such",
+        "than",
+        "that",
+        "the",
+        "their",
+        "theirs",
+        "them",
+        "themselves",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "through",
+        "to",
+        "too",
+        "under",
+        "until",
+        "up",
+        "very",
+        "was",
+        "wasn't",
+        "we",
+        "were",
+        "weren't",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "whom",
+        "why",
+        "will",
+        "with",
+        "won't",
+        "would",
+        "wouldn't",
+        "you",
+        "your",
+        "yours",
+        "yourself",
+        "yourselves",
+    ]
+)
 
 
 def query_terms(query: str) -> tuple[str, ...]:
     """Return the distinct case-folded terms one query searches for.
 
-    Words are split on whitespace and stripped of surrounding punctuation. The
-    list is a plain set of words, not a pattern, and not a parsed question: this
-    store has no model and no index, and matching is a substring test.
+    Words are split on whitespace and stripped of surrounding punctuation, then
+    English stop words are dropped: the word side requires every remaining term,
+    so a term that decides nothing can only lose the answer. A query made
+    entirely of stop words keeps them, because dropping all of them would leave
+    the index nothing to search on and the read would report an empty memory
+    rather than an unusual question.
     """
 
     terms: list[str] = []
@@ -128,49 +338,8 @@ def query_terms(query: str) -> tuple[str, ...]:
         cleaned = word.strip(".,;:!?\"'`()[]{}<>*_#-")
         if cleaned and cleaned not in terms:
             terms.append(cleaned)
-    return tuple(terms)
-
-
-def append_round(
-    scope_directory: Path,
-    q_ls: list[str],
-    ans_ls: list[str],
-    now: datetime | None = None,
-) -> Path:
-    """Append one round to a scope, exactly as upstream writes it.
-
-    Returns the file the round was written to. The first round of a day creates
-    the file with upstream's header; later rounds append to it.
-    """
-    user_text = str(q_ls[0] or "").strip() if q_ls else ""
-    assistant_text = str(ans_ls[0] or "").strip() if ans_ls else ""
-    if not user_text:
-        raise StoreError(EMPTY_MESSAGE_ERRORS[0])
-    if not assistant_text:
-        raise StoreError(EMPTY_MESSAGE_ERRORS[1])
-
-    read_standing(scope_directory)
-    rounds = daily_rounds(scope_directory)
-    rounds.mkdir(parents=True, exist_ok=True)
-
-    # Upstream stamps a round with local time and writes no zone; that stamp is
-    # part of the format this package reproduces, so the call is the same one.
-    moment = now if now is not None else datetime.now()  # noqa: DTZ005
-    date_str = moment.strftime("%Y-%m-%d")
-    time_str = moment.strftime("%H:%M:%S")
-    daily_file = rounds / f"{date_str}.md"
-
-    entry = (
-        f"\n## {date_str} {time_str}\n"
-        f"- user: {user_text}\n"
-        f"- assistant: {assistant_text}\n"
-    )
-    if not daily_file.exists():
-        daily_file.write_text(f"# Project Memory {date_str}\n{entry}", encoding="utf-8")
-    else:
-        with daily_file.open("a", encoding="utf-8") as handle:
-            handle.write(entry)
-    return daily_file
+    meaningful = [term for term in terms if term not in STOPWORDS]
+    return tuple(meaningful or terms)
 
 
 def standing_digest(scope_directory: Path) -> str | None:
@@ -179,91 +348,6 @@ def standing_digest(scope_directory: Path) -> str | None:
     if not document.is_file():
         return None
     return hashlib.sha256(document.read_bytes()).hexdigest()
-
-
-def count_rounds(scope_directory: Path) -> int:
-    """Count one scope's rounds without reading their text."""
-    rounds = daily_rounds(scope_directory)
-    if not rounds.is_dir():
-        return 0
-    total = 0
-    for path in sorted(rounds.glob("*.md")):
-        with path.open(encoding="utf-8") as handle:
-            total += sum(1 for line in handle if line.startswith("## "))
-    return total
-
-
-def latest_round_date(scope_directory: Path) -> str | None:
-    """Return the newest date one scope has a round for, or None."""
-    rounds = daily_rounds(scope_directory)
-    if not rounds.is_dir():
-        return None
-    dates = sorted(path.stem for path in rounds.glob("*.md"))
-    return dates[-1] if dates else None
-
-
-def list_rounds(
-    scope_directory: Path,
-    limit: int = 20,
-) -> tuple[list[dict[str, str]], bool]:
-    """Return a scope's newest rounds first, and whether older ones were left out.
-
-    Only rounds written in the format ``append_round`` writes are recognized: a
-    ``## <date> <time>`` heading followed by the user's line and the assistant's
-    line. Text under a heading that carries neither is kept with the round, so a
-    message that wrapped onto a second line survives the round trip.
-    """
-    rounds = daily_rounds(scope_directory)
-    if not rounds.is_dir():
-        return [], False
-
-    selected: list[dict[str, str]] = []
-    truncated = False
-    for path in sorted(rounds.glob("*.md"), key=lambda item: item.stem, reverse=True):
-        parsed = _parse_rounds(path.read_text(encoding="utf-8"), path.name)
-        for entry in reversed(parsed):
-            if len(selected) >= limit:
-                truncated = True
-                break
-            selected.append(entry)
-        if truncated:
-            break
-    return selected, truncated
-
-
-def _parse_rounds(text: str, source_file: str) -> list[dict[str, str]]:
-    """Return the rounds one daily file holds, oldest first."""
-    parsed: list[dict[str, str]] = []
-    current: dict[str, str] | None = None
-    field: str | None = None
-
-    for line in text.splitlines():
-        heading = ROUND_HEADING_PATTERN.match(line)
-        if heading:
-            current = {
-                "date": heading.group(1),
-                "time": heading.group(2),
-                "user": "",
-                "assistant": "",
-                "source_file": source_file,
-            }
-            parsed.append(current)
-            field = None
-            continue
-        if current is None:
-            continue
-        for name, prefix in (
-            ("user", USER_LINE_PREFIX),
-            ("assistant", ASSISTANT_LINE_PREFIX),
-        ):
-            if line.startswith(prefix):
-                current[name] = line[len(prefix) :]
-                field = name
-                break
-        else:
-            if field is not None and line.strip():
-                current[field] = f"{current[field]}\n{line}"
-    return parsed
 
 
 def write_standing(

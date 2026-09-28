@@ -64,7 +64,8 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
         async with Client(_transport(thesis, storage)) as client:
             recorded = _data(
                 await client.call_tool(
-                    "set_memory_local", {"content": "The thesis lives in drafts/"}
+                    "set_memory_local",
+                    {"content": "The thesis lives in drafts/", "type": "note"},
                 )
             )
         async with Client(_transport(notes, storage)) as client:
@@ -100,7 +101,8 @@ def test_both_projects_share_the_global_memory(
     async def scenario() -> tuple[dict[str, Any], str]:
         async with Client(_transport(thesis, storage)) as client:
             await client.call_tool(
-                "set_memory_global", {"content": "Prefer British English"}
+                "set_memory_global",
+                {"content": "Prefer British English", "type": "preference"},
             )
         async with Client(_transport(notes, storage)) as client:
             read = _data(

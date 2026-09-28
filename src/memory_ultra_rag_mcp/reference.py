@@ -1,9 +1,13 @@
 """The UltraRAG revision this server's memory behaviour is taken from.
 
 Nothing here is configurable. The two memory kinds this server serves follow one
-behaviour — a standing document plus dated rounds, written in a fixed format — and
-this module records which upstream revision that behaviour and those formats were
-taken from, so a change to either is a deliberate change to this file.
+behaviour — a standing document written in a fixed format — and this module
+records which upstream revision that behaviour and that format were taken from,
+so a change to either is a deliberate change to this file.
+
+Upstream also keeps a dated exchange log beside the standing document. This
+package does not read or write one, and the divergence is recorded in the
+README's choice table.
 """
 
 from __future__ import annotations

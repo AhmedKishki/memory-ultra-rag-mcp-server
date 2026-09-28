@@ -21,7 +21,7 @@ from memory_ultra_rag_mcp import server
 from memory_ultra_rag_mcp.config import resolve_config
 from memory_ultra_rag_mcp.index import MemoryIndex
 from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
-from memory_ultra_rag_mcp.store import append_round, append_statement
+from memory_ultra_rag_mcp.store import append_statement, standing_document
 from memory_ultra_rag_mcp.vectors import vector_path
 
 
@@ -46,12 +46,14 @@ def _engine(config, embedder: FakeEmbedder | None = None, **policy) -> Retrieval
     )
 
 
-def _populate(directory: Path, rounds: int = 200) -> None:
-    """Write a scope with this many dated rounds, through the store."""
+def _populate(directory: Path, statements: int = 200) -> None:
+    """Write a scope with this many statements, through the store."""
 
-    append_statement(directory, "the draft lives in docs/")
-    for index in range(rounds):
-        append_round(directory, [f"note {index} about the draft"], ["noted"])
+    append_statement(directory, "the draft lives in docs/", statement_type="NOTE")
+    for index in range(statements):
+        append_statement(
+            directory, f"note {index} about the draft", statement_type="NOTE"
+        )
 
 
 def test_a_read_does_no_work_proportional_to_the_memory(tmp_path: Path) -> None:
@@ -69,7 +71,7 @@ def test_a_read_does_no_work_proportional_to_the_memory(tmp_path: Path) -> None:
     engine = _engine(config, embedder)
     with MemoryIndex(directory) as index:
         index.sync()
-    engine.maintain(directory, append_round(directory, ["a round"], ["noted"]))
+    engine.maintain(directory, standing_document(directory))
     engine.worker_for(directory).drain(5.0)
     before_documents = len(embedder.documents)
 
@@ -93,7 +95,7 @@ def test_a_read_stays_inside_its_latency_ceiling(tmp_path: Path) -> None:
     directory = config.local_directory
     _populate(directory)
     engine = _engine(config, FakeEmbedder())
-    engine.maintain(directory, append_round(directory, ["a round"], ["noted"]))
+    engine.maintain(directory, standing_document(directory))
     engine.worker_for(directory).drain(5.0)
 
     engine.answer(scope="local", directory=directory, query="draft", limit=10)
@@ -103,6 +105,22 @@ def test_a_read_stays_inside_its_latency_ceiling(tmp_path: Path) -> None:
 
     assert answer["elapsed_ms"] > 0
     assert answer["elapsed_ms"] <= engine.policy.read_ceiling_ms
+
+
+def test_the_ceiling_is_asserted_against_a_fake_reranker_and_says_so() -> None:
+    """The cross-encoder is the one cost this bound does not cover.
+
+    A fake reranker scores in no time, so this ceiling guards the fusion, the
+    word scan and the vector scan. The real reranker's cost is measured out of
+    band and recorded in the policy's docstring; if that measurement moves, the
+    number there is what has to change, and this test is what tells you it did
+    not.
+    """
+
+    default = RetrievalSettings(embedding_model="fake/model")
+    assert default.reranker_model is not None
+    assert default.rerank_depth == 10
+    assert default.read_ceiling_ms >= 500.0
 
 
 def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
@@ -116,7 +134,9 @@ def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             recorded = _data(
-                await client.call_tool("set_memory_local", {"content": "a fact"})
+                await client.call_tool(
+                    "set_memory_local", {"content": "a fact", "type": "note"}
+                )
             )
             return recorded
 
@@ -131,30 +151,30 @@ def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
         vector_path(config.local_directory).exists() is False or True
     )  # opened or not
     engine.worker_for(config.local_directory).drain(5.0)
-    assert "a fact" in embedder.documents
+    # What gets embedded is the stored block, so the type is part of the vector:
+    # a query naming the category can then reach the statement by meaning too.
+    assert "NOTE: a fact" in embedder.documents
 
 
-def test_a_write_touches_only_the_file_it_wrote(tmp_path: Path) -> None:
-    """A write is proportional to one file, not to the memory."""
+def test_a_write_touches_only_the_document_it_wrote(tmp_path: Path) -> None:
+    """A write is proportional to one file, and a scope is one file."""
 
     config = _scope(tmp_path)
     directory = config.local_directory
-    _populate(directory, rounds=50)
+    _populate(directory, statements=50)
     engine = _engine(config, FakeEmbedder())
     with MemoryIndex(directory) as index:
         index.sync()
-        files_before = len(index.sources())
+        assert len(index.sources()) == 1
 
-    # One more round through the page's path, and the index follows only it.
-    written = append_round(directory, ["one more round"], ["noted"])
-    engine.maintain(directory, written)
+    append_statement(directory, "one more statement", statement_type="NOTE")
+    engine.maintain(directory, standing_document(directory))
 
     with MemoryIndex(directory) as index:
-        # Every file is still known, and the new round is in exactly one.
-        assert len(index.sources()) == files_before
-        assert written.name in {
-            path.name for path in directory.joinpath("project").glob("*.md")
-        }
+        # Still one file, and the new statement is in the index.
+        assert len(index.sources()) == 1
+        found, _ = index.search("more", 10)
+        assert [unit["text"] for unit in found] == ["NOTE: one more statement"]
 
 
 def test_the_derived_state_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:
@@ -164,9 +184,9 @@ def test_the_derived_state_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> Non
 
     config = _scope(tmp_path)
     directory = config.local_directory
-    _populate(directory, rounds=5)
+    _populate(directory, statements=5)
     engine = _engine(config, FakeEmbedder())
-    engine.maintain(directory, append_round(directory, ["a round"], ["noted"]))
+    engine.maintain(directory, standing_document(directory))
     engine.worker_for(directory).drain(5.0)
     answer = engine.answer(scope="local", directory=directory, query="draft", limit=10)
     assert answer["returned"] > 0

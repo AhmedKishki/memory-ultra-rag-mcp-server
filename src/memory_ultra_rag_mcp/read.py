@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from .index import MemoryIndex
 from .models import Embedder, ModelError, Reranker
-from .store import read_standing
+from .store import STATEMENT_LABEL_PATTERN, read_standing
 from .vectors import VectorStore
 
 if TYPE_CHECKING:
@@ -44,6 +44,25 @@ if TYPE_CHECKING:
     from .retrieval import RetrievalSettings
 
 __all__ = ["Answer", "answer_read"]
+
+
+def _answered_text(kind: str, stored: str) -> str:
+    """Return the text one unit is answered with.
+
+    A statement is stored under its own label, and the index and the vectors keep
+    that whole block: the label is a category the caller chose, and letting it be
+    indexed is what makes a query naming the category find the statements filed
+    under it. The answer drops the label, because a caller that recorded a
+    statement wants the statement back, not the category it filed it under.
+
+    Every unit in a scope is a statement now, so the check is kept only to make
+    that assumption explicit: anything this store did not write is returned
+    untouched, rather than losing its first words to a pattern meant for a label.
+    """
+
+    if kind != "statement":
+        return stored
+    return STATEMENT_LABEL_PATTERN.sub("", stored, count=1).strip()
 
 
 @dataclass(slots=True)
@@ -193,7 +212,9 @@ def answer_read(
     answer.units = [
         {
             "kind": units_by_key[key]["kind"],
-            "text": units_by_key[key]["text"],
+            "text": _answered_text(
+                units_by_key[key]["kind"], units_by_key[key]["text"]
+            ),
             "source": units_by_key[key]["source"],
             "stamp": units_by_key[key]["stamp"],
             "matched_by": side,
