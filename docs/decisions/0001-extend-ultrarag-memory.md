@@ -4,6 +4,12 @@
 
 Status: accepted 2026-09-27. It records the intent this server was built to; it introduces no new behaviour.
 
+**Amended 2026-09-28.** The dated dialogue log is no longer written or read, and a
+statement carries a type. Three places below describe the log as part of this
+server's shape, and they are superseded: what it says about *upstream* is still
+true, and what it says about *this* server is not. The decisions that reasoned
+from the log are kept, because the reasoning holds without it.
+
 ## Context
 
 UltraRAG ships a memory server (`servers/memory/src/memory.py`, reviewed at `3a709a2aea3fbe46acca59c422621c94b6e86857`, version `0.3.0.2`). It keeps one kind of memory: a standing `MEMORY.md` plus one dated dialogue file per day, per `user_id`, under a storage root, written and read through `get_global_memory` and `save_memory`.
@@ -11,7 +17,7 @@ UltraRAG ships a memory server (`servers/memory/src/memory.py`, reviewed at `3a7
 That is a good format and a working server, and it is the base rather than a starting point. Two things it does not do, both of which an agent working across repositories needs:
 
 - **Nothing is project-scoped.** Every `user_id` is one flat memory, so a project inherits every other project's material and carries none of its own out of the repository.
-- **There is nowhere for a rule to live.** A standing instruction the user gave once — "always cite the commit", "use British English" — is written as a round in a dated file, where nothing reads it and nothing gives it standing.
+- **There is nowhere for a rule to live.** A standing instruction the user gave once — "always cite the commit", "use British English" — is written as an exchange in a dated file, where nothing reads it and nothing gives it standing.
 
 The UltraRAG UI already reads the `memory/` directory of its own storage tree. Whatever a project-scoped memory looks like, the shared one has to stay there, or the UI stops being able to show it.
 
@@ -21,17 +27,19 @@ The UltraRAG UI already reads the `memory/` directory of its own storage tree. W
 
 **2. The extension is a second, project-scoped memory.** A project's memory lives inside that repository, under `.memory-rag`, in upstream's format. One server instance serves one project and binds it at startup, so a project's memory is private to it and travels with it.
 
-**3. Global memory is where durable, cross-project rules live.** The account is the unit, not the project: who the user is, what they want remembered everywhere, and the standing instructions that apply wherever they work. A rule belongs in the global standing document, not in a project's, and not in a dated round.
+**3. Global memory is where durable, cross-project rules live.** The account is the unit, not the project: who the user is, what they want remembered everywhere, and the standing instructions that apply wherever they work. A rule belongs in the global standing document, not in a project's.
 
 **3a. There is no user dimension on the global tools.** Upstream keys its memory by `user_id`; this server does not, and neither the tools nor the page takes one. A project is identified by the repository the server is bound to, so a user identifier would be a second identity for something already identified, and an agent would have to decide which user it is before it could remember anything. The global memory is one per account, and it lives in the directory upstream uses for the user it is given when none is named — `memory/default/` — so the layout stays upstream's, an existing store keeps working, and a UltraRAG UI still reads it. The tools are four; the page shows two blocks, this project and global.
 
 **4. The agent is told which kind to use, and is given four names to choose from.** `get_memory_local` / `set_memory_local` and `get_memory_global` / `set_memory_global`: two verbs, two scopes, and the scope in the name, so the only decision is whether a memory is this project's or this user's. Read global memory at the start of a conversation and project memory when working inside the project, and act on what they say. A statement about the user, or an instruction they gave once, is global; a statement about this project is local.
 
-**4a. The tool names are a recorded difference from upstream.** Upstream's `get_global_memory` and `save_memory` are renamed rather than re-exposed, and the read is renamed too because it no longer reads a whole file. UltraRAG's two tools and this package's four are different surfaces on the same files, and `tests/test_upstream_differential.py` asserts the difference rather than assuming it. The **files** remain the compatibility contract: same names, same bytes, same template, same daily-round format.
+**4a. The tool names are a recorded difference from upstream.** Upstream's `get_global_memory` and `save_memory` are renamed rather than re-exposed, and the read is renamed too because it no longer reads a whole file. UltraRAG's two tools and this package's four are different surfaces on the same files, and `tests/test_upstream_differential.py` asserts the difference rather than assuming it. The **files** remain the compatibility contract: same names, same bytes, same template.
 
-**4b. A write records a statement, not an exchange.** `set_*` appends one plain block to the standing document, with no speaker attached: it is what the caller chose to remember, not something the user said and not something an assistant replied. Attributing either would put a claim in a file the user reads that nobody made. The dated files stay the exchange history, written in upstream's format by the browser view, and read by a query.
+**4b. A write records a statement, not an exchange.** `set_*` appends one plain block to the standing document, with no speaker attached: it is what the caller chose to remember, not something the user said and not something an assistant replied. Attributing either would put a claim in a file the user reads that nobody made. The dated log is not kept: anything worth keeping is recorded as a statement, and a date does not change what a statement is.
 
-**4c. A read answers a query and returns only what matched.** These memories grow by appending, so returning one whole spends the context window on the file and becomes unusable after a few weeks. A read returns the units that matched — a statement, or a dated round — each naming the file and stamp it came from, plus how it matched and whether anything was left out. No file, no document, no whole memory is ever returned, and there is no way to ask for one.
+**4b-bis. A statement is filed under a type the caller names.** One run of block letters, written as the statement's own first words and a colon, indexed and embedded with the statement and stripped from every answer. The server defines no categories and interprets none. A memory is a list of unrelated statements, and a category is what makes a query for "which of these are corrections" answerable at all.
+
+**4c. A read answers a query and returns only what matched.** These memories grow by appending, so returning one whole spends the context window on the file and becomes unusable after a few weeks. A read returns the statements that matched, each naming the document it came from, plus how it matched and whether anything was left out. No file, no document, no whole memory is ever returned, and there is no way to ask for one.
 
 **4d. A read works in words and in meaning, from local models.** Words come from an FTS5 index over the scope's own files; meaning comes from a pinned, CPU-only sentence embedder run in this process, its vectors held in a second derived file beside the index. The two sides are fused by weighted reciprocal rank fusion and a cosine floor, so a unit can arrive by words, by meaning, or by both, and the answer says which. Three properties make this safe to add without moving the record: the vectors are **derived**, so deleting them costs a re-embedding and nothing else; the model is chosen by a **documented table** with one default, so a stronger or multilingual model is one line; and both sides are written against a **seam** (`Embedder`, `Reranker`) that no store or index imports, so a hosted backend later would be additive rather than a rewrite. The store and the indexes import no model library at all.
 
@@ -71,7 +79,7 @@ Recorded so the next reader does not mistake an absence for an oversight, and do
 - **No way to read a memory whole.** There is no tool, flag, or query that returns a file, and no limit that can be raised to reach one. What is relevant comes back; the rest does not.
 - **No paging.** `limit` caps the units; there is no offset, no cursor, and no date range.
 - **No cross-scope vector search.** Each scope's vectors are its own; nothing searches two of them together, because a project's memory must not travel by accident.
-- **Nothing removes or corrects a statement.** Statements are appended; the standing document is replaced only through the browser view or by hand, and a dated round is never edited.
+- **Nothing removes or corrects a statement.** Statements are appended; the standing document is replaced only through the browser view or by hand.
 - **No session tier.** Every statement is durable; nothing expires.
-- **No typed or relational structure.** Objects, types, and relations between them are not this server's subject; the memory model is upstream's, deliberately.
+- **No relational structure.** Objects and relations between them are not this server's subject; the memory model is upstream's, deliberately. A type on a statement is a free label for retrieval, not a schema.
 - **No cross-scope read.** One call reads one scope. Global memory is read by naming it, and a project's memory is never returned inside a global read, because a per-project fact must not travel by accident.

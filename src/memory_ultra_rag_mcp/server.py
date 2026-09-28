@@ -1,8 +1,8 @@
 """One stdio MCP server serving UltraRAG's memory, global and local.
 
-Both kinds work the same way and have the same shape: a standing document plus
-one dated dialogue file per day, written in UltraRAG's own format. They differ in
-where they live and therefore who can see them.
+Both kinds work the same way and have the same shape: one standing document,
+``MEMORY.md``, of statements in UltraRAG's own format. They differ in where they
+live and therefore who can see them.
 
 * **global memory** belongs to a user and lives in UltraRAG's UI storage tree, so
   every instance serving that tree reads the same memory.
@@ -68,8 +68,7 @@ ContentParameter = Annotated[
     Field(
         description=(
             "The one statement to remember, in the user's own words where it is "
-            "theirs. Plain text: a line or a short paragraph, not a question and "
-            "an answer."
+            "theirs. A line or a short paragraph."
         )
     ),
 ]
@@ -77,12 +76,12 @@ TypeParameter = Annotated[
     str,
     Field(
         description=(
-            "The category this statement is filed under, as one run of block "
-            "letters with no white space: 'RULE', 'PLAN', 'PREFERENCE'. This "
-            "server defines no categories and interprets none — the label is "
-            "recorded with the statement, is searchable, and is not returned when "
-            "the statement is recalled. It is written in block letters whichever "
-            "case you send it in."
+            "The category to file it under: one run of block letters, no white "
+            "space, e.g. 'RULE', 'PLAN', 'PREFERENCE'. Reuse a category you have "
+            "already used, so a query naming it finds every statement filed there. "
+            "This server defines no categories and interprets none. The label is "
+            "recorded and searchable, and is not returned on recall. Any case is "
+            "recorded in block letters."
         )
     ),
 ]
@@ -90,10 +89,9 @@ QueryParameter = Annotated[
     str,
     Field(
         description=(
-            "What to recall, as words. This project's statements are searched for "
-            "those words and for their meaning, and only what matched is returned. "
-            "Required: this server answers a question rather than returning a "
-            "memory whole, and no tool can return a file."
+            "What to recall, as words. Answered from the statements that match, by "
+            "their words and by their meaning. Required: this server answers a "
+            "question rather than returning a memory whole."
         )
     ),
 ]
@@ -102,8 +100,7 @@ LimitParameter = Annotated[
     Field(
         description=(
             f"How many matched statements to return, at most {MAX_RESULT_LIMIT}. "
-            "Raising this raises the cap on matches, never the amount of a file "
-            "that is read."
+            "This caps matches, not the size of a file read."
         )
     ),
 ]
@@ -186,13 +183,9 @@ def create_server(
         """Remember one typed statement that applies everywhere this account works.
 
         Use it for what is true of the user, and for a standing instruction they
-        gave: those belong in every project, so they go here and nowhere else. The
-        statement is appended to the standing document in global memory, which the
-        user and the browser view can edit. There is one global memory, so there is
-        nothing to name and nothing to choose.
-
-        `type` is the category you file the statement under: one run of block letters.
-        This server defines no categories and interprets none.
+        gave: those belong in every project, so they go here and nowhere else.
+        Appended to the global standing document, which the user and the browser
+        view can edit.
         """
         directory = config.global_directory
         return _recorded(engine, "global", directory, content, type)
@@ -203,13 +196,10 @@ def create_server(
     ) -> dict[str, Any]:
         """Remember one typed statement for this project only.
 
-        Use it for what is true here — a decision, a path, a convention, where
-        something lives — and not for anything the user said applies everywhere.
-        The statement is appended to this project's standing document, inside the
-        repository under `.memory-rag`, so it travels with the project.
-
-        `type` is the category you file the statement under: one run of block letters.
-        This server defines no categories and interprets none.
+        Use it for what is true here — a decision, a path, a convention — and not
+        for anything the user said applies everywhere. Appended to this project's
+        standing document, inside the repository under `.memory-rag`, so it
+        travels with the project.
         """
         return _recorded(engine, "local", config.local_directory, content, type)
 
@@ -220,9 +210,8 @@ def create_server(
     ) -> dict[str, Any]:
         """Recall what applies everywhere this account works.
 
-        Answer it from the statements in the account's global memory that match
-        the query. This is the account's one global memory, shared by every
-        project on this storage root.
+        Answers from the statements in the account's one global memory that match
+        the query, shared by every project on this storage root.
         """
         return _answer(engine, "global", config.global_directory, query, limit)
 
@@ -233,9 +222,8 @@ def create_server(
     ) -> dict[str, Any]:
         """Recall what is true about this project.
 
-        Answer it from the statements in this project's memory that match the
-        query, nearest first. Nothing outside this repository is read, and no
-        other project's memory is reachable from here.
+        Answers from the statements in this project's memory that match the query,
+        nearest first. No other project's memory is reachable from here.
         """
         return _answer(engine, "local", config.local_directory, query, limit)
 

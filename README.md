@@ -5,9 +5,9 @@
 - **local memory** belongs to the project this server is bound to and lives inside that repository, under `.memory-rag`, so a project carries its memory with it and no other project reads it;
 - **global memory** belongs to the account and lives in UltraRAG's shared storage tree, so every instance serving that tree reads the same memory. It is not a project's: who the user is, what they want remembered everywhere, and the **durable rules that apply wherever they work**.
 
-Both kinds work the same way: one standing document per scope, `MEMORY.md`, written in UltraRAG's format. The agent chooses which kind a write goes to, and the two tools of each kind take the same arguments apart from the global pair's absence of a `user_id`. A standing instruction the user gave once belongs in global memory's standing document, where it is read at the start of every conversation, rather than anywhere local.
+Both kinds are one standing document per scope, `MEMORY.md`, of statements in UltraRAG's format, and the two kinds take the same arguments. A standing instruction the user gave once belongs in global memory, where it is read at the start of every conversation, rather than anywhere local.
 
-There are no dated rounds. Upstream keeps a day-per-file dialogue log beside the standing document; this server does not, because anything worth keeping is recorded as a statement and a date does not change what it is. That divergence, and the one below, are in the choice table.
+There are no dated rounds. Upstream keeps a day-per-file dialogue log beside the standing document; this server does not, because anything worth keeping is recorded as a statement. Every divergence from upstream is in the choice table below.
 
 The behaviour, the tool names, the file names, and the byte formats are UltraRAG's, taken from `servers/memory/src/memory.py` at the pinned revision below and checked against files that revision produced. The difference this package makes is where a project's memory lives: UltraRAG keeps everything under one storage tree, and this server keeps each project's memory inside the project. What the extension is, and what it deliberately leaves alone, is decided in [ADR 0001](docs/decisions/0001-extend-ultrarag-memory.md).
 
@@ -86,7 +86,7 @@ The answer carries:
 - `matched_by` on the answer and on each unit: words, meaning, or both, and `reranked` for the third stage;
 - whether anything was left out, whether the meaning side was available at all, and how long the read took.
 
-Every unit names the document it came from. Nothing else is returned: no file, no document, no whole memory, and no way to ask for one. The label a statement was filed under is in the index and in the answer's own search, and is not in the returned text — a caller that recorded a statement gets the statement back, and a query naming the category still finds them.
+Every unit names the document it came from. Nothing else is returned: no file, no document, no whole memory, and no way to ask for one. A statement's label is searchable but is not in the returned text.
 
 Two derived indexes sit beside the files and hold nothing the Markdown does not: `index.sqlite3` for words, rebuilt in seconds, and `index-vectors.sqlite3` for meaning, whose cost is one embedding per unit. A read costs the same whatever the memory holds — measured on this repository's corpus shape, a word query costs the same over 50,000 statements as over 1,000, and a vector scan is arithmetic over a few megabytes. The record is still the Markdown, so either file can be deleted and rebuilt.
 
@@ -94,7 +94,7 @@ The write side keeps both current: the tools, the browser view, and `memory-ultr
 
 **A write records one typed statement.** `set_*` appends the statement to the standing document as plain text, with no speaker attached to it: it is what you chose to remember, not something the user said and not something an assistant replied. A statement is the whole record, and nothing dates it.
 
-**Every statement carries a type, and a read does not repeat it.** `type` is required, and it is yours: this server defines no categories, checks none, and interprets none. It is one run of block letters — `RULE`, `PLAN`, `PREFERENCE` — with no white space and nothing else in it, and it is written as the statement's own first words followed by a colon, so the standing document is plain prose with no field syntax and a person opening `MEMORY.md` reads it the way they would read a note. A type carries no meaning of its own: it exists to help a read find the statements filed under it, and the same word reused across statements is what makes that work. It is indexed and embedded with the statement, so a query naming the category finds them. It is not in the answer: `get_*` returns the statement as you wrote it, without the label. That asymmetry is the point — a caller that recorded a statement wants the statement back, not the category it happened to file it under, while the category stays in the record and stays searchable. Case is the one thing normalised rather than refused: a type given as `rule` is recorded as `RULE`.
+**Every statement carries a type, and a read does not repeat it.** `type` is required and it is yours: this server defines no categories, checks none, and interprets none. It is one run of block letters — `RULE`, `PLAN`, `PREFERENCE` — with no white space and nothing else in it, written as the statement's own first words and a colon, so the document stays plain prose. It exists to help a read find what was filed under it, which is why it is indexed and embedded with the statement: a query naming the category finds them. It is not in the answer, because a caller that recorded a statement wants the statement back and not the label. Case is the one thing normalised rather than refused: `rule` is recorded as `RULE`.
 
 ```markdown
 RULE: The user's decision is final and is not revisited without being asked.
@@ -118,7 +118,7 @@ The view shows the bound project's memory and the account's global memory **toge
 - that scope's **standing memory**, whole, with a copy button;
 - **Edit standing memory** on the block, which replaces the whole document only when it still matches the version the page read, so a write an agent made meanwhile is never overwritten.
 
-The shared page still has a section for dated exchanges, because it asks for them under the same capability that shows the memory view and an action that refused would take the whole view down. This adapter answers that request with an empty list, which is the true answer here, and the page's own empty-state wording is what says otherwise. That wording is a rough edge in `ui-ultra-rag-mcp`, not here.
+The shared page still asks for dated exchanges, because it fetches them under the same capability that shows the memory view and an action that refused would take the whole view down. This adapter answers with an empty list, which is the true answer here; the page's own empty-state wording is the rough edge, and it belongs to `ui-ultra-rag-mcp`.
 
 `memory-ultra-rag-ui` takes `--project-root`, `--storage-root`, `--host` (loopback only), and `--port` (default 5052). The page is the shared `ui-ultra-rag-mcp` package, pinned by commit, and this package supplies a thin adapter: the browser calls this server, the server reads and writes its own memory, and the view is handed no directory of its own.
 
