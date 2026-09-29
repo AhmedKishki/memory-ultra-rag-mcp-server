@@ -54,14 +54,10 @@ from .config import (
     ServerConfig,
     resolve_config,
 )
+from .index import MemoryIndex
 from .retrieval import Retrieval
 from .server import create_server
-from .store import (
-    StoreError,
-    read_standing,
-    standing_digest,
-    write_standing,
-)
+from .store import EXPORT_FILENAME, StoreError, parse_document
 
 if TYPE_CHECKING:
     from starlette.applications import Starlette
@@ -272,7 +268,7 @@ class MemoryUIAdapter:
         for entry in described:
             directory = entry["directory"]
             entry["directory"] = str(directory)
-            entry["standing_present"] = standing_digest(directory) is not None
+            entry["standing_present"] = (directory / EXPORT_FILENAME).is_file()
             # The shared page shows a round count per scope. There are none, and
             # the honest zero is what keeps its wording honest rather than wrong.
             entry["round_count"] = 0
@@ -307,8 +303,6 @@ class MemoryUIAdapter:
         and the page's own wording is what says otherwise.
         """
 
-        directory = self.scope_directory(arguments)
-        read_standing(directory)
         return {
             "scope": arguments.get("scope"),
             "round_count": 0,
@@ -320,11 +314,14 @@ class MemoryUIAdapter:
         directory = self.scope_directory(arguments)
         # The read creates the standing document from UltraRAG's template when it
         # is missing, exactly as the memory tools do.
-        return {
-            "scope": arguments.get("scope"),
-            "content": read_standing(directory),
-            "sha256": standing_digest(directory),
-        }
+        with MemoryIndex(directory) as index:
+            index.adopt_document_if_empty()
+            index.write_export()
+            return {
+                "scope": arguments.get("scope"),
+                "content": index.export(),
+                "sha256": index.export_digest(),
+            }
 
     async def memory_append(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         """Refuse the page's round write, because this memory records statements.
@@ -351,11 +348,24 @@ class MemoryUIAdapter:
         expected = arguments.get("expected_sha256")
         if expected is not None and not isinstance(expected, str):
             raise UIRequestError("expected_sha256 must be a string")
-        digest = write_standing(directory, content, expected_sha256=expected)
+        # The record is the memory, so the page's editor is a request to change
+        # the set of statements rather than a file to write. A statement whose
+        # words are unchanged keeps its date and its count.
+        with MemoryIndex(directory) as index:
+            if expected is not None and index.export_digest() != expected:
+                raise UIRequestError(
+                    "the memory changed since this page was loaded; reload it and "
+                    "edit again",
+                    status_code=409,
+                )
+            report = index.replace_all(parse_document(content))
+            digest = index.export_digest()
+            index.write_export()
         return {
             "status": "saved",
             "scope": arguments.get("scope"),
             "sha256": digest,
+            **report,
         }
 
     async def call_tool(

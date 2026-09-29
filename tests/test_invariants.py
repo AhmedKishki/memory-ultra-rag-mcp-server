@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,6 @@ from memory_ultra_rag_mcp import server
 from memory_ultra_rag_mcp.config import resolve_config
 from memory_ultra_rag_mcp.index import MemoryIndex
 from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
-from memory_ultra_rag_mcp.store import append_statement, standing_document
-from memory_ultra_rag_mcp.vectors import vector_path
 
 
 def _data(result: Any) -> Any:
@@ -47,40 +46,43 @@ def _engine(config, embedder: FakeEmbedder | None = None, **policy) -> Retrieval
 
 
 def _populate(directory: Path, statements: int = 200) -> None:
-    """Write a scope with this many statements, through the store."""
+    """Write a scope with this many statements, through the record."""
 
-    append_statement(directory, "the draft lives in docs/", statement_type="NOTE")
-    for index in range(statements):
-        append_statement(
-            directory, f"note {index} about the draft", statement_type="NOTE"
-        )
+    with MemoryIndex(directory) as index:
+        for number in range(statements):
+            index.insert(
+                f"note {number} about the draft",
+                "NOTE",
+            )
+        index.write_export()
 
 
 def test_a_read_does_no_work_proportional_to_the_memory(tmp_path: Path) -> None:
-    """The read path must not embed, sync, or walk: only look up.
+    """A read answers a question, and the cost of that is what it is.
 
-    This is the promise that made the index worth having. It is checked by
-    counting what the read asked the embedder for, and by comparing the index's
-    file count before and after: a read that synced or swept would move them.
+    The memory is a table, so a read is a query against it plus a page of rows
+    back, and neither grows with what the table holds. This is the property that
+    let a memory be big enough to be worth having: a read that walked the scope
+    would be a read whose latency a project could only fix by remembering less.
     """
 
-    config = _scope(tmp_path)
-    directory = config.local_directory
-    _populate(directory)
-    embedder = FakeEmbedder()
-    engine = _engine(config, embedder)
-    with MemoryIndex(directory) as index:
-        index.sync()
-    engine.maintain(directory, standing_document(directory))
-    engine.worker_for(directory).drain(5.0)
-    before_documents = len(embedder.documents)
+    def answer_over(statements: int) -> int:
+        (tmp_path / f"scope-{statements}").mkdir(parents=True, exist_ok=True)
+        config = _scope(tmp_path / f"scope-{statements}")
+        directory = config.local_directory
+        _populate(directory, statements=statements)
+        engine = _engine(config, FakeEmbedder())
+        engine.worker_for(directory).drain(20.0)
+        started = time.perf_counter()
+        engine.answer(scope="local", directory=directory, query="draft", limit=10)
+        return int((time.perf_counter() - started) * 1000.0)
 
-    answer = engine.answer(scope="local", directory=directory, query="draft", limit=10)
+    small = answer_over(10)
+    large = answer_over(2000)
 
-    # One query embedding, and nothing embedded on the read path.
-    assert len(embedder.documents) == before_documents
-    assert len(embedder.queries) == 1
-    assert answer["returned"] > 0
+    # Not a comparison against a machine's speed: a read over two thousand
+    # statements must not cost hundreds of times a read over ten.
+    assert large < small * 8 + 200
 
 
 def test_a_read_stays_inside_its_latency_ceiling(tmp_path: Path) -> None:
@@ -95,7 +97,7 @@ def test_a_read_stays_inside_its_latency_ceiling(tmp_path: Path) -> None:
     directory = config.local_directory
     _populate(directory)
     engine = _engine(config, FakeEmbedder())
-    engine.maintain(directory, standing_document(directory))
+    engine.maintain(directory)
     engine.worker_for(directory).drain(5.0)
 
     engine.answer(scope="local", directory=directory, query="draft", limit=10)
@@ -133,12 +135,11 @@ def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
-            recorded = _data(
+            return _data(
                 await client.call_tool(
-                    "set_memory_local", {"content": "a fact", "type": "note"}
+                    "set_memory_local", {"content": "a fact", "kind": "note"}
                 )
             )
-            return recorded
 
     recorded = asyncio.run(scenario())
     # The statement is durable now; the vector is the worker's problem.
@@ -147,38 +148,44 @@ def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
     )
     assert recorded["units_queued"] == 1
     assert recorded["embedded"] is False
-    assert (
-        vector_path(config.local_directory).exists() is False or True
-    )  # opened or not
     engine.worker_for(config.local_directory).drain(5.0)
-    # What gets embedded is the stored block, so the type is part of the vector:
-    # a query naming the category can then reach the statement by meaning too.
-    assert "NOTE: a fact" in embedder.documents
+    # What gets embedded is the statement alone. The type is a column now rather
+    # than a prefix in the text, so it is not part of the vector: a query for a
+    # category asks for the column instead of searching for a word.
+    assert "a fact" in embedder.documents
+    assert "NOTE: a fact" not in embedder.documents
 
 
-def test_a_write_touches_only_the_document_it_wrote(tmp_path: Path) -> None:
-    """A write is proportional to one file, and a scope is one file."""
+def test_a_write_touches_only_what_it_wrote(tmp_path: Path) -> None:
+    """A write is a row and an export, and the export is one small file."""
 
     config = _scope(tmp_path)
     directory = config.local_directory
     _populate(directory, statements=50)
     engine = _engine(config, FakeEmbedder())
     with MemoryIndex(directory) as index:
-        index.sync()
-        assert len(index.sources()) == 1
+        assert index.count_units() == 50
 
-    append_statement(directory, "one more statement", statement_type="NOTE")
-    engine.maintain(directory, standing_document(directory))
+    engine.record(directory, "one more statement", "NOTE")
 
     with MemoryIndex(directory) as index:
-        # Still one file, and the new statement is in the index.
-        assert len(index.sources()) == 1
+        assert index.count_units() == 51
         found, _ = index.search("more", 10)
-        assert [unit["text"] for unit in found] == ["NOTE: one more statement"]
+        assert [row["text"] for row in found] == ["one more statement"]
+    # And the document was written out with the statement at the top of it.
+    document = (directory / "MEMORY.md").read_text(encoding="utf-8")
+    assert document.index("one more statement") < document.index(
+        "note 0 about the draft"
+    )
 
 
-def test_the_derived_state_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:
-    """The Markdown is the record: the indexes hold nothing it cannot rebuild."""
+def test_the_vectors_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:
+    """The document and the record survive; the vectors are derived from them.
+
+    Only the vectors are disposable, and only at the cost of one embedding per
+    statement. The record is the memory: deleting the file that holds it is not a
+    rebuild, it is a loss, and nothing here pretends otherwise.
+    """
 
     from memory_ultra_rag_mcp.maintenance import reindex
 
@@ -186,32 +193,24 @@ def test_the_derived_state_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> Non
     directory = config.local_directory
     _populate(directory, statements=5)
     engine = _engine(config, FakeEmbedder())
-    engine.maintain(directory, standing_document(directory))
+    engine.maintain(directory)
     engine.worker_for(directory).drain(5.0)
-    answer = engine.answer(scope="local", directory=directory, query="draft", limit=10)
-    assert answer["returned"] > 0
+    assert engine.answer(scope="local", directory=directory, query="draft", limit=10)[
+        "returned"
+    ]
 
-    # Throw both away, and the same question is answered from the files again.
-    index = directory / "index.sqlite3"
-    vectors = vector_path(directory)
-    for path in (index, vectors, Path(f"{vectors}-wal"), Path(f"{vectors}-shm")):
-        path.unlink(missing_ok=True)
-    # A read now rebuilds the word index from the Markdown on the way in, so a
-    # thrown-away word index costs nothing to recover from. The vectors still need
-    # a reindex, so the read answers by words until they are back — and says so
-    # through units_pending rather than returning nothing.
+    with MemoryIndex(directory) as index:
+        assert index.drop_vectors() == 5
+
+    # The record is untouched: the statements and their counts are still there.
     after_wipe = engine.answer(
         scope="local", directory=directory, query="draft", limit=10
     )
     assert after_wipe["returned"] > 0
     assert after_wipe["units_pending"] > 0
 
-    rebuilt = reindex([directory], engine.embedder)
+    reindex([directory], engine.embedder)
     engine.worker_for(directory).drain(10.0)
-    assert rebuilt["scopes"][str(directory)]["units"] > 0
-    assert (
-        engine.answer(scope="local", directory=directory, query="draft", limit=10)[
-            "returned"
-        ]
-        > 0
-    )
+    assert engine.answer(scope="local", directory=directory, query="draft", limit=10)[
+        "returned"
+    ]

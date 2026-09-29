@@ -18,6 +18,11 @@ Three properties are decisions rather than details:
   answers, always with the nearest thing it has, and always answering is worse
   than declining. A unit within the relative margin of the query's own best is
   the one exception, so a single strong match is not discarded with the rest.
+* **New information wins a tie, and only a tie.** The document is ordered newest
+  first, so a statement's position says when it was recorded, and a statement that
+  matched equally well and was recorded later is the better answer. The
+  preference is a small bonus on the fused score and nothing more: it breaks ties
+  and can never lift a weaker match over a better one.
 * **A read reports what it could not do.** If the model is not resident, the
   answer says the semantic side was unavailable rather than quietly returning a
   worse result that looks like the same one. If the index may be behind because
@@ -35,7 +40,6 @@ from typing import TYPE_CHECKING, Any
 
 from .index import MemoryIndex
 from .models import Embedder, ModelError, Reranker
-from .store import STATEMENT_LABEL_PATTERN, read_standing
 from .vectors import VectorStore
 
 if TYPE_CHECKING:
@@ -44,25 +48,6 @@ if TYPE_CHECKING:
     from .retrieval import RetrievalSettings
 
 __all__ = ["Answer", "answer_read"]
-
-
-def _answered_text(kind: str, stored: str) -> str:
-    """Return the text one unit is answered with.
-
-    A statement is stored under its own label, and the index and the vectors keep
-    that whole block: the label is a category the caller chose, and letting it be
-    indexed is what makes a query naming the category find the statements filed
-    under it. The answer drops the label, because a caller that recorded a
-    statement wants the statement back, not the category it filed it under.
-
-    Every unit in a scope is a statement now, so the check is kept only to make
-    that assumption explicit: anything this store did not write is returned
-    untouched, rather than losing its first words to a pattern meant for a label.
-    """
-
-    if kind != "statement":
-        return stored
-    return STATEMENT_LABEL_PATTERN.sub("", stored, count=1).strip()
 
 
 @dataclass(slots=True)
@@ -74,17 +59,17 @@ class Answer:
     units: list[dict[str, Any]] = field(default_factory=list)
     matched_by: str = "lexical"
     semantic_available: bool = False
-    index_synced: int = 0
-    unlabelled: int = 0
     units_pending: int = 0
     truncated: bool = False
     reranked: bool = False
+    document_rewritten: bool = False
+    hint: str | None = None
     elapsed_ms: float = 0.0
 
     def payload(self) -> dict[str, Any]:
         """Return the object a read answers with."""
 
-        return {
+        answer: dict[str, Any] = {
             "scope": self.scope,
             "query": self.query,
             "matched_by": self.matched_by,
@@ -93,11 +78,13 @@ class Answer:
             "truncated": self.truncated,
             "semantic_available": self.semantic_available,
             "units_pending": self.units_pending,
-            "index_synced": self.index_synced,
-            "unlabelled": self.unlabelled,
+            "document_rewritten": self.document_rewritten,
             "reranked": self.reranked,
             "elapsed_ms": round(self.elapsed_ms, 2),
         }
+        if self.hint is not None:
+            answer["hint"] = self.hint
+        return answer
 
 
 def _fuse(
@@ -128,6 +115,83 @@ def _fuse(
     return fused
 
 
+def _position(units_by_key: dict[str, dict[str, str]], key: str) -> int:
+    """Return a statement's place in the document, or a large one if unknown."""
+
+    row = units_by_key.get(key)
+    if row is None:
+        return 10**6
+    try:
+        return int(row.get("stamp") or 0)
+    except (TypeError, ValueError):
+        return 10**6
+
+
+def _recency_ranks(
+    ordered: Sequence[tuple[str, float, str, bool]],
+    history: dict[str, dict[str, object]],
+) -> dict[str, int]:
+    """Rank the dated statements among these candidates, newest first.
+
+    The bonus is by date, not by position, because a document written before this
+    package ordered statements on top holds its oldest statement first, and a
+    position there means the opposite of what it means now. A statement with no
+    recorded date — one typed into the Markdown by hand, or one from before the
+    bookkeeping file existed — is not in this map at all, and so gets no bonus
+    rather than a wrong one.
+    """
+
+    dated = [
+        key
+        for key, _score, _side, _both in ordered
+        if (history.get(key) or {}).get("added_at")
+    ]
+    dated.sort(key=lambda key: str(history[key]["added_at"]), reverse=True)
+    return {key: rank for rank, key in enumerate(dated)}
+
+
+def _recency(rank: int | None, policy: RetrievalSettings) -> float:
+    """Return how much a statement's date is worth against the ones it tied with.
+
+    The newest statement among a set of otherwise equal matches is worth
+    ``recency_bonus`` — ten per cent of its score by default — the next is worth
+    half of that, and it decays from there. A statement that was never dated is
+    worth nothing, which is the honest answer rather than a guess.
+
+    This is a multiplier on a score that already says how well the statement
+    matched. At the default it reorders matches that are close and leaves a
+    materially better one first, which is what "a slight preference for what is
+    new" has to mean if it is to mean anything.
+    """
+
+    if rank is None or policy.recency_bonus <= 0.0:
+        return 0.0
+    return policy.recency_bonus / (1 + rank)
+
+
+def _stated(row: dict[str, str], facts: dict[str, Any]) -> dict[str, Any]:
+    """Return one statement as the caller is told about it.
+
+    The text is the statement without its type, because a caller that recorded a
+    statement wants the statement back rather than the label it filed it under;
+    the type is a field of its own, so a query that found a statement by its type
+    can be told which type it was. ``stamp`` is the position the document records
+    it at, which is how a caller sees that an answer came from the newest end.
+    """
+
+    # The type is a field of its own, so the text is the statement and nothing
+    # else: a caller that recorded something gets back the words they recorded.
+    statement = row.get("text", "")
+    return {
+        "text": statement,
+        "kind": row.get("kind"),
+        "stamp": row.get("stamp"),
+        "added_at": facts.get("added_at") or None,
+        "recalls": int(facts.get("recalls") or 0),
+        "last_recalled_at": facts.get("last_recalled_at"),
+    }
+
+
 def answer_read(
     *,
     scope: str,
@@ -137,8 +201,15 @@ def answer_read(
     embedder: Embedder,
     reranker: Reranker | None,
     policy: RetrievalSettings,
+    kind: str | None = None,
 ) -> Answer:
-    """Answer one read from a scope's derived state."""
+    """Answer one read from a scope's own file.
+
+    The index is open for the whole read, so the histories it holds are read from
+    the same connection and the recalls this answer hands out are counted on it
+    too. That is what keeps the work proportional to the answer: the counting is
+    one ``UPDATE`` per unit returned, not a rewrite of anything.
+    """
 
     started = time.perf_counter()
     answer = Answer(scope=scope, query=query)
@@ -149,22 +220,16 @@ def answer_read(
 
     pool = max(int(limit) + 1, policy.pool_depth)
     identity = embedder.identity
-    # Upstream brings a scope into being on the first read, creating the
-    # directory and the standing document from its template. That is how a
-    # memory starts, and it is one small file, so it stays on the read path even
-    # though the document is no longer what a read returns.
-    read_standing(directory)
     with MemoryIndex(directory) as index:
-        # Bring the word index in step with the Markdown before searching, so a
-        # statement a person edited or added by hand is answerable without anyone
-        # running a reindex. When nothing changed this is one fingerprint; when
-        # something did, the file is re-read once. Vectors for new statements are
-        # the write side's async work, and `units_pending` reports them below.
-        caught_up = index.catch_up()
-        answer.index_synced = int(caught_up["synced"])
-        answer.unlabelled = int(caught_up["unlabelled"])
+        # The document is an export of the record, so a read brings it back in
+        # line and says whether it was stale: a hand edit to it is not read, and
+        # the caller is told rather than left to find that their edit did not take.
+        # A record with nothing in it adopts the document instead, which is how a
+        # memory written by an older version is recovered.
+        index.adopt_document_if_empty()
+        answer.document_rewritten = index.write_export()
 
-        lexical = _lexical(index, query, pool)
+        lexical = _lexical(index, query, pool, kind)
         units_by_key.update(index.units_by_key([key for key, _ in lexical]))
 
         with VectorStore(directory, identity.name, identity.dimension) as store:
@@ -191,57 +256,102 @@ def answer_read(
                         floor=policy.cosine_floor,
                         margin=policy.relative_margin,
                     )
+                    if kind is not None:
+                        # The vector side is a set of numbers and has no column to
+                        # filter, so a category is applied to what it found.
+                        with MemoryIndex(directory) as types:
+                            wanted = types.statements_by_kind(kind)
+                        semantic = [
+                            (key, score) for key, score in semantic if key in wanted
+                        ]
                     units_by_key.update(
                         index.units_by_key([key for key, _ in semantic])
                     )
 
-    fused = _fuse(lexical, semantic, policy)
-    # Each side is asked for one row past the pool, so a longer fused list than
-    # the caller asked for means the answer is a selection, not the whole match.
-    answer.truncated = len(fused) > max(int(limit), 1)
-    ordered = fused[: max(int(limit), 1)]
+        fused = _fuse(lexical, semantic, policy)
+        # Each side is asked for one row past the pool, so a longer fused list than
+        # the caller asked for means the answer is a selection, not the whole match.
+        answer.truncated = len(fused) > max(int(limit), 1)
+        ordered = fused[: max(int(limit), 1)]
 
-    if reranker is not None and len(ordered) > 1:
-        candidates = [
-            units_by_key[key]["text"] for key, _, _, _ in ordered if key in units_by_key
-        ]
-        if candidates:
-            scores = reranker.score(query, candidates)
-            paired = [
-                (item, score)
-                for item, score in zip(ordered, scores, strict=False)
-                if item[0] in units_by_key
+        if reranker is not None and len(ordered) > 1:
+            candidates = [
+                units_by_key[key]["text"]
+                for key, _, _, _ in ordered
+                if key in units_by_key
             ]
-            paired.sort(key=lambda entry: entry[1], reverse=True)
-            ordered = [item for item, _ in paired]
-            answer.reranked = True
+            if candidates:
+                scores = reranker.score(query, candidates)
+                paired = [
+                    (item, score)
+                    for item, score in zip(ordered, scores, strict=False)
+                    if item[0] in units_by_key
+                ]
+                paired.sort(key=lambda entry: entry[1], reverse=True)
+                ordered = [item for item, _ in paired]
+                answer.reranked = True
 
-    answer.units = [
-        {
-            "kind": units_by_key[key]["kind"],
-            "text": _answered_text(
-                units_by_key[key]["kind"], units_by_key[key]["text"]
-            ),
-            "source": units_by_key[key]["source"],
-            "stamp": units_by_key[key]["stamp"],
-            "matched_by": side,
-            "score": round(score, 6),
-        }
-        for key, score, side, _both in ordered
-        if key in units_by_key
-    ]
-    if semantic and not lexical:
-        answer.matched_by = "semantic"
-    elif lexical and semantic:
-        answer.matched_by = "both"
-    else:
-        answer.matched_by = "lexical"
+        # What was recalled has been recalled, whichever side found it. The count
+        # is one update per unit answered, on the connection this read already
+        # holds, so it is proportional to the answer rather than to the memory —
+        # and SQLite makes it atomic, so nothing is written beside the memory and
+        # nothing is deferred to a thread.
+        keys = [key for key, _score, _side, _both in ordered if key in units_by_key]
+        index.note_recalled(keys)
+        history = index.history(keys)
+
+        # Recency is applied last, over the fused and reranked order, so it settles
+        # a tie that neither the two sides nor the cross-encoder could and never
+        # overrides one of them. It is by recorded date rather than by position: a
+        # document written before this package ordered statements on top holds its
+        # oldest statement first, so a position there would mean the opposite of a
+        # recency.
+        ranks = _recency_ranks(ordered, history)
+        if ranks:
+            boosted = [
+                (key, score * (1.0 + _recency(ranks.get(key), policy)), side, both)
+                for key, score, side, both in ordered
+            ]
+            boosted.sort(key=lambda entry: entry[1], reverse=True)
+            ordered = boosted
+
+        answer.units = [
+            {
+                **_stated(units_by_key[key], history.get(key, {})),
+                "matched_by": side,
+                "score": round(score, 6),
+            }
+            for key, score, side, _both in ordered
+            if key in units_by_key
+        ]
+        if semantic and not lexical:
+            answer.matched_by = "semantic"
+        elif lexical and semantic:
+            answer.matched_by = "both"
+        else:
+            answer.matched_by = "lexical"
+    if not answer.units:
+        # An answer with nothing in it is where an agent decides whether to try
+        # again, so it says what to try rather than leaving the guidance in a
+        # document the caller read once and is not reading now.
+        answer.hint = (
+            "no statement matched those words. Try other words for the same thing, "
+            "or read with a type to see everything filed under one."
+            if answer.semantic_available
+            else "no statement matched those words, and only the words were "
+            "searched: the meaning side was not available. Try other words."
+        )
     answer.elapsed_ms = (time.perf_counter() - started) * 1000.0
     return answer
 
 
-def _lexical(index: MemoryIndex, query: str, pool: int) -> list[tuple[str, int]]:
-    """Return the units the words found, best first, as (unit key, rank)."""
+def _lexical(
+    index: MemoryIndex,
+    query: str,
+    pool: int,
+    kind: str | None = None,
+) -> list[tuple[str, int]]:
+    """Return the statements the words found, best first, as (unit key, rank)."""
 
-    found, _mode = index.search(query, pool)
+    found, _mode = index.search(query, pool, kind)
     return [(str(row["unit_key"]), rank) for rank, row in enumerate(found, start=1)]

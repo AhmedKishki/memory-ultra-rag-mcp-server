@@ -24,9 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .index import MemoryIndex
 from .maintenance import EmbeddingWorker, embed_pending, warm_models
 from .models import Embedder, ModelError, Reranker
 from .read import answer_read
+from .store import HANDOFF_KIND, StoreError, normalise, statement_kind
+from .vectors import VectorStore
 
 __all__ = ["Retrieval", "RetrievalSettings"]
 
@@ -51,6 +54,16 @@ class RetrievalSettings:
     bm25_weight: float = 1.25
     dense_weight: float = 1.0
     rrf_k: int = 60
+
+    #: What fraction of its own score a statement is worth for being the newest
+    #: of the candidates that matched about as well. A statement is dated when it
+    #: is recorded, and the newest one among equals gets the whole bonus, the next
+    #: half of it, and so on. At 0.1 a materially better match still comes first
+    #: and a match that is close to it does not; this is a knob and not a
+    #: guarantee, so a caller who sets it to 1.0 is asking for the newest answer
+    #: whatever it says. Zero turns it off, which is what a memory that must be
+    #: reproducible from its own scores wants.
+    recency_bonus: float = 0.1
 
     #: How many candidates each side contributes before fusion. This is an
     #: internal depth, not the answer: the answer is exactly ``limit`` units, and
@@ -95,6 +108,7 @@ class RetrievalSettings:
             "bm25_weight": self.bm25_weight,
             "dense_weight": self.dense_weight,
             "rrf_k": self.rrf_k,
+            "recency_bonus": self.recency_bonus,
             "pool_depth": self.pool_depth,
             "reranker_model": self.reranker_model or "off",
             "rerank_depth": self.rerank_depth,
@@ -132,6 +146,13 @@ class Retrieval:
             self._workers[key] = EmbeddingWorker(self.embedder, directory)
         return self._workers[key]
 
+    def close(self) -> None:
+        """Stop this process's background workers."""
+
+        for worker in self._workers.values():
+            worker.stop()
+        self._workers.clear()
+
     def warm(self) -> dict[str, Any]:
         """Load the models now, so a later read finds them resident."""
 
@@ -140,21 +161,33 @@ class Retrieval:
         )
 
     def record(
-        self, directory: Path, content: str, statement_type: str
+        self,
+        directory: Path,
+        content: str,
+        kind: str | None = None,
+        *,
+        replace_kind: str | None = None,
     ) -> dict[str, Any]:
-        """Record one typed statement and queue its vector, reporting what it queued.
+        """Record one typed statement, and write the document out again.
 
-        The type is the caller's own category, passed through to the store without
-        being interpreted here, and echoed back so a write can be confirmed against
-        what was actually filed.
+        The statement is a row: its text, the type the caller named, its place at
+        the top of the document, and the time it was recorded. The document is then
+        written out from the record, because a memory nobody can open is not one
+        anybody can check. The type is the caller's own category, passed through
+        without being interpreted here, and echoed back so a write can be confirmed
+        against what was actually filed. A caller that names no type gets `ITEM`.
         """
 
-        from .store import StoreError, append_statement
-
+        statement = str(content or "").strip()
+        if not statement:
+            raise ModelError("content must not be empty.")
         try:
-            digest = append_statement(directory, content, statement_type=statement_type)
+            label = statement_kind(kind)
         except StoreError as error:
             raise ModelError(str(error)) from error
+        with MemoryIndex(directory) as index:
+            key, replaced = index.insert(statement, label, replace_kind=replace_kind)
+            written = index.write_export()
         queued = embed_pending(
             directory,
             self.embedder,
@@ -162,22 +195,103 @@ class Retrieval:
             changed=directory / "MEMORY.md",
         )
         return {
-            "status": "set",
-            "type": statement_type,
+            "status": "handoff" if replace_kind is not None else "set",
+            "kind": label,
+            "replaced": replaced,
+            "text": statement,
+            "key": key,
             "directory": str(directory),
             "standing_document": str(directory / "MEMORY.md"),
-            "sha256": digest,
+            "document_written": written,
             "embedding_model": self.policy.embedding_model,
             "units_queued": queued,
             "embedded": queued == 0,
         }
 
-    def maintain(self, directory: Path, written: Path) -> int:
-        """Keep the derived state in step after a write that was not a tool call."""
+    def forget(self, directory: Path, query: str) -> dict[str, Any]:
+        """Remove the one statement this query is exactly, and report what went.
 
-        return embed_pending(
-            directory, self.embedder, self.worker_for(directory), changed=written
+        The match is on the words, never on meaning, and a query that matches more
+        than one statement removes none of them. The row goes first, so the
+        statement is gone before anything derived from it is; then the document is
+        written out, its rows are dropped, and its vector is dropped, so it cannot
+        answer again and it leaves no count behind for a statement that no longer
+        exists.
+        """
+
+        statement = str(query or "").strip()
+        if not statement:
+            raise ModelError(
+                "query must not be empty: forgetting takes the exact text of the "
+                "statement to remove, so read it first if you do not have it"
+            )
+        with MemoryIndex(directory) as index:
+            found = index.forget(normalise(statement))
+            if not found:
+                raise ModelError(
+                    "nothing matched exactly, so nothing was forgotten. This "
+                    "server forgets on an exact match only: read the statement "
+                    "first, then forget the text the read returned."
+                )
+            if len(found) > 1:
+                listed = "; ".join(f"[{item.kind}] {item.text}" for item in found[:5])
+                raise ModelError(
+                    f"{len(found)} statements match that text exactly, so none "
+                    f"were forgotten: {listed}. Forget one that is unique, or "
+                    "remove the duplicates by hand in the record."
+                )
+            removed = found[0]
+            index.write_export()
+        vectors = 0
+        identity = self.embedder.identity
+        with VectorStore(directory, identity.name, identity.dimension) as store:
+            vectors = store.forget([removed.key])
+        return {
+            "status": "forgotten",
+            "forgotten": 1,
+            "kind": removed.kind,
+            "text": removed.text,
+            "position": removed.position,
+            "recalls_removed": removed.recalls,
+            "vectors_removed": vectors,
+            "directory": str(directory),
+            "standing_document": str(directory / "MEMORY.md"),
+        }
+
+    def handoff(self, directory: Path, content: str) -> dict[str, Any]:
+        """Put this session's handoff at the top, replacing the last one.
+
+        A handoff is one statement filed under the reserved type `HANDOFF`. The
+        previous one is removed by that type, so a handoff is a standing single
+        entry rather than a list of them, and the caller never has to remember
+        that an older one was there. The count of what it replaced is returned,
+        because a replaced statement is still data the caller may want to know it
+        lost.
+        """
+
+        return self.record(directory, content, HANDOFF_KIND, replace_kind=HANDOFF_KIND)
+
+    def maintain(self, directory: Path) -> dict[str, Any]:
+        """Bring the document in line with the record, and say whether it was stale.
+
+        The document is an export, so a hand edit to it is not read: it is
+        overwritten with the record, and the caller is told, because an edit that
+        appeared to work and then vanished is worse than one that never took. A
+        record with nothing in it adopts the document instead, which is how a
+        memory written by an older version is recovered.
+        """
+
+        with MemoryIndex(directory) as index:
+            adopted = index.adopt_document_if_empty()
+            written = index.write_export()
+        queued = embed_pending(
+            directory, self.embedder, self.worker_for(directory), changed=None
         )
+        return {
+            "adopted": adopted,
+            "document_written": written,
+            "units_queued": queued,
+        }
 
     def answer(
         self,
@@ -186,14 +300,21 @@ class Retrieval:
         directory: Path,
         query: str,
         limit: int,
+        kind: str | None = None,
     ) -> dict[str, Any]:
-        """Answer one read, in words and in meaning."""
+        """Answer one read, in words and in meaning.
+
+        A ``kind`` narrows the answer to one category. The type is a
+        column of the record rather than a word in the text, so it is asked for
+        rather than searched for.
+        """
 
         return answer_read(
             scope=scope,
             directory=directory,
             query=query,
             limit=limit,
+            kind=kind,
             embedder=self.embedder,
             reranker=self.reranker,
             policy=self.policy,

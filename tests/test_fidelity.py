@@ -40,10 +40,12 @@ def test_the_standing_document_is_named_as_upstream_names_it(
 def test_a_scope_is_one_document_and_nothing_else(tmp_path: Path) -> None:
     """No dated directory is created, and none is looked for."""
 
-    from memory_ultra_rag_mcp.store import append_statement
+    from memory_ultra_rag_mcp.index import MemoryIndex
 
     scope = tmp_path / "scope"
-    append_statement(scope, "a fact", statement_type="NOTE")
-    assert [path.name for path in sorted(scope.rglob("*"))] == [
-        "MEMORY.md",
-    ]
+    with MemoryIndex(scope) as index:
+        index.insert("a fact", "NOTE")
+        index.write_export()
+
+    assert [path.name for path in scope.rglob("*")] == ["MEMORY.md", "memory.sqlite3"]
+    assert not (scope / "project").exists()

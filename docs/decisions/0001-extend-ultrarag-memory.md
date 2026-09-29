@@ -4,11 +4,22 @@
 
 Status: accepted 2026-09-27. It records the intent this server was built to; it introduces no new behaviour.
 
-**Amended 2026-09-28.** The dated dialogue log is no longer written or read, and a
-statement carries a type. Three places below describe the log as part of this
-server's shape, and they are superseded: what it says about *upstream* is still
-true, and what it says about *this* server is not. The decisions that reasoned
-from the log are kept, because the reasoning holds without it.
+**Amended twice on 2026-09-28.** The dated dialogue log is no longer written or
+read, a statement carries a type, and the record moved into the table:
+`memory.sqlite3` holds the statements, their types, their places, their dates and
+their counts, and `MEMORY.md` is an export of it — written from the record, never
+read from it. Places below that describe the log as part of this server's shape,
+or the document as the thing that is true, are superseded: what they say about
+*upstream* is still true, and what they say about *this* server is not. The
+decisions that reasoned from them are kept where the reasoning still holds.
+
+What the second amendment costs, so it is not discovered later: a hand edit to
+`MEMORY.md` does not change the memory, and the read that overwrites it says so
+(`document_rewritten`); a kind is a column and so is asked for with the read's
+`kind` argument rather than searched for as a word; and a memory recovered from an
+export has the right statements in the right order with every one of them undated
+and filed as `ITEM`. The README's choice table (33, 34, 35) records each of
+these, and `tests/test_metadata.py` and `tests/test_index.py` pin them.
 
 ## Context
 
@@ -47,7 +58,7 @@ The UltraRAG UI already reads the `memory/` directory of its own storage tree. W
 
 **4f. A read keeps the index in step; it is the write side that embeds.** A search answers what the index holds, so keeping it current used to happen only where the files are written — the tools, the page, and `memory-ultra-rag-reindex` — and a read reported `index_files_behind` rather than sweep. That was a deliberate trade against a measurement from the collection's other server: ~0.18 ms per source across a few thousand *dated files*, hundreds of milliseconds in total, plus a 4 KB head read per file here. **Reversed 2026-09-28.** This server keeps one document per scope — there are no dated files, and none since the round log was dropped — so the per-source sweep that justified the trade does not exist here. A read now fingerprints the document and re-reads it when it changed, measured at 17 µs unchanged and ~2 ms changed against a read of hundreds of milliseconds, and a statement typed, reworded, or deleted by hand is reflected in the very next answer. The vectors a hand edit still owes stay with the write side's async worker and are disclosed as `units_pending`, and `memory-ultra-rag-reindex` is what settles them or forces a full pass. What this section still guards: a read must not embed a unit, must not walk a scope, and must never return a file.
 
-**4d. The search runs over an index, and the index is derived.** Matching is SQLite FTS5 over a `index.sqlite3` built from the scope's own files and kept beside them, so a read is a lookup and a page of rows rather than a pass over every dated file, and its cost does not grow with the memory. Three properties follow from the Markdown staying the record: nothing in the write path updates the index, because a read compares each file against what was indexed and re-reads what changed; a hand edit, or one made by a UltraRAG UI, is read correctly; and deleting the index costs one rebuild. FTS5 is a compile-time option of SQLite, so the server probes for it and refuses to start without it, rather than serve reads that grow with the memory.
+**4d. The search runs over a table, and the table is the record.** Matching is SQLite FTS5 over a `memory.sqlite3` built from the scope's own files and kept beside them — which since 2026-09-28 also holds a statement's history, so "derived" now covers the word index inside that file and not the file as a whole, so a read is a lookup and a page of rows rather than a pass over every dated file, and its cost does not grow with the memory. Three properties follow from the Markdown staying the record: nothing in the write path updates the index, because a read compares each file against what was indexed and re-reads what changed; a hand edit, or one made by a UltraRAG UI, is read correctly; and the word index is rebuilt whenever the document changes. Since 2026-09-28 the same file also holds the vectors and each statement's history, so deleting the file costs a rebuild, a re-embedding, and the history, which no rebuild can produce. FTS5 is a compile-time option of SQLite, so the server probes for it and refuses to start without it, rather than serve reads that grow with the memory.
 
 **4e. The query is words, and how it was interpreted is reported.** The query's words are required to be present together first, because an index answers that without visiting the rest of the memory and because it is what a question like "where does ref000137 keep the draft" means. When nothing holds every word, the query falls back to the words that occur in the fewest units, since an over-strict conjunction returning nothing is worse than a broader one. The answer says which of the two happened, so a caller is never left guessing whether an empty result means absent or merely unmatched.
 

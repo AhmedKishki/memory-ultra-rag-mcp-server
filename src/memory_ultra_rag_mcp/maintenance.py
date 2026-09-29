@@ -47,12 +47,11 @@ DEFAULT_BATCH = 64
 
 @dataclass(frozen=True, slots=True)
 class PendingUnit:
-    """One unit waiting for a vector: the text, and where it came from."""
+    """One statement waiting for a vector: its text, its type, and where it sits."""
 
     key: str
     text: str
     kind: str
-    source: str
     stamp: str
 
 
@@ -150,15 +149,23 @@ class EmbeddingWorker:
         ) as store:
             try:
                 store.put(
-                    unit.text,
+                    unit.key,
                     vectors[0],
-                    source=unit.source,
                     stamp=unit.stamp,
                     kind=unit.kind,
                 )
             except ValueError:
                 # Another model's file: leave it for reindex rather than mixing.
                 return
+
+
+def _pending(index: MemoryIndex, key: str) -> PendingUnit:
+    """Return the statement a key names, as the worker needs to embed it."""
+
+    found = index.units_by_key([key]).get(key)
+    if found is None:
+        return PendingUnit(key, "", "ITEM", "0")
+    return PendingUnit(key, str(found["text"]), str(found["kind"]), str(found["stamp"]))
 
 
 def embed_pending(
@@ -168,33 +175,23 @@ def embed_pending(
     *,
     changed: Path | None = None,
 ) -> int:
-    """Queue the units of a scope that have no vector, and return how many.
+    """Queue the statements of a scope that have no vector, and return how many.
 
-    ``changed`` narrows the work to the one file a write just wrote, which is
-    what keeps a write proportional to that file rather than to the memory: a
-    statement lands in the standing document, an exchange in one dated file.
-    Without it the whole scope is considered, which is what ``reindex`` and the
-    diagnostic surface want.
+    The record is the table, so there is nothing to sync first and nothing to
+    narrow: what is asked about is which statements the vector file is missing,
+    which is a set difference over keys and not a pass over the scope's files.
     """
 
+    identity = embedder.identity
     with MemoryIndex(scope_directory) as index:
-        if changed is None:
-            index.sync()
-            source = None
-        else:
-            index.sync_file(changed)
-            source = str(changed.relative_to(scope_directory))
-        units = index.unit_keys(source)
-        identity = embedder.identity
-        with VectorStore(scope_directory, identity.name, identity.dimension) as store:
-            have = store.has(units)
-            missing = index.units_by_key(units - have)
+        units = index.unit_keys()
+    with VectorStore(scope_directory, identity.name, identity.dimension) as store:
+        have = store.has(units)
+    missing = units - have
     if worker is None:
         return len(missing)
-    for key, row in missing.items():
-        worker.submit(
-            PendingUnit(key, row["text"], row["kind"], row["source"], row["stamp"])
-        )
+    for key in missing:
+        worker.submit(_pending(index, key))
     return len(missing)
 
 
@@ -205,32 +202,41 @@ def reindex(
     worker: EmbeddingWorker | None = None,
     batch: int = DEFAULT_BATCH,
 ) -> dict[str, Any]:
-    """Bring one or more scopes' derived state fully up to date.
+    """Settle one or more scopes: recover, export, and embed what is missing.
 
-    This is the answer to "I edited the files by hand": the read path maintains
-    what the writers write, and this catches everything else — a changed
-    statement, an added or removed dated file, an index built by another model,
-    or a vector file that was deleted.
+    This is the answer to "the file and the database disagree". A record with
+    nothing in it adopts the document, which is how a memory written by an older
+    version is recovered; a document that does not match the record is rewritten
+    from it; and the statements with no vector are embedded, which is the one thing
+    here that costs a model.
     """
 
     report: dict[str, Any] = {"scopes": {}}
+    # A worker writes vectors into the file of the scope it was built for, so it
+    # can only serve that one. Rebuilding several scopes therefore embeds here,
+    # in the process that is already doing maintenance work, rather than handing
+    # a second scope's statements to the first scope's writer.
+    queue = worker if len(scope_directories) == 1 else None
     for scope_directory in scope_directories:
         identity = embedder.identity if embedder is not None else None
         with MemoryIndex(scope_directory) as index:
-            indexed = index.sync()
+            adopted = index.adopt_document_if_empty()
+            rewritten = index.write_export()
             units = index.unit_keys()
             store_report: dict[str, Any] = {
-                "lexical": indexed,
+                "adopted_from_document": adopted,
+                "document_rewritten": rewritten,
                 "units": len(units),
             }
+            missing = set()
             if identity is not None:
                 with VectorStore(
                     scope_directory, identity.name, identity.dimension
                 ) as store:
                     if store.model_is_foreign():
                         store_report["vectors"] = "foreign model; rebuilt"
-                        for path in _vector_siblings(scope_directory):
-                            path.unlink(missing_ok=True)
+                        with MemoryIndex(scope_directory) as scope_file:
+                            scope_file.drop_vectors()
                         with VectorStore(
                             scope_directory, identity.name, identity.dimension
                         ) as fresh:
@@ -238,45 +244,37 @@ def reindex(
                     else:
                         missing = units - store.has(units)
                     store_report["vectors_held"] = store.count()
-            else:
-                missing = set()
             store_report["units_pending"] = len(missing)
-        if embedder is not None:
-            rows = index.units_by_key(missing)
-            if worker is not None:
-                for key, row in rows.items():
-                    worker.submit(
-                        PendingUnit(
-                            key, row["text"], row["kind"], row["source"], row["stamp"]
+            # A vector whose statement the record no longer holds is about nothing
+            # that exists. A memory recovered from an export is the case that makes
+            # them: the words come back and the types do not, so every recovered
+            # statement is a new one and the old vectors are orphans.
+            store_report["vectors_collected"] = index.collect_vectors()
+            if embedder is not None and missing:
+                rows = index.units_by_key(missing)
+                if queue is not None:
+                    for key in rows:
+                        queue.submit(_pending(index, key))
+                else:
+                    # Several scopes, or no worker: embed here, in the process that
+                    # is already doing maintenance work and has no caller waiting.
+                    with VectorStore(
+                        scope_directory, identity.name, identity.dimension
+                    ) as store:
+                        vectors = embedder.embed_documents(
+                            [row["text"] for row in rows.values()]
                         )
-                    )
-            else:
-                identity = embedder.identity
-                with VectorStore(
-                    scope_directory, identity.name, identity.dimension
-                ) as store:
-                    vectors = embedder.embed_documents(
-                        [row["text"] for row in rows.values()]
-                    )
-                    for (key, row), vector in zip(rows.items(), vectors, strict=True):
-                        store.put(
-                            row["text"],
-                            vector,
-                            source=row["source"],
-                            stamp=row["stamp"],
-                            kind=row["kind"],
-                        )
+                        for (key, row), vector in zip(
+                            rows.items(), vectors, strict=True
+                        ):
+                            store.put(
+                                key,
+                                vector,
+                                stamp=str(row["stamp"]),
+                                kind=str(row["kind"]),
+                            )
         report["scopes"][str(scope_directory)] = store_report
     return report
-
-
-def _vector_siblings(scope_directory: Path) -> list[Path]:
-    """Return this scope's vector file and the write-ahead files beside it."""
-
-    from .vectors import vector_path
-
-    path = vector_path(scope_directory)
-    return [Path(f"{path}{suffix}") for suffix in ("", "-wal", "-shm")]
 
 
 def warm_models(

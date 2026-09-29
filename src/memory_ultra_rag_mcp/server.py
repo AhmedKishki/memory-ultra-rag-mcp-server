@@ -9,12 +9,16 @@ live and therefore who can see them.
 * **local memory** belongs to the project this server is bound to and lives inside
   that repository, under ``.memory-rag``, so it travels with the project.
 
-The surface is four tools, named by what they do and which kind they touch, so the
-only decision an agent makes is whether a memory is this project's or this
-account's. No tool returns a whole memory: a read takes a query, answers it from
-the statements that match, and reports what it searched, because a memory that
-grows by appending cannot be handed to a model whole without spending the context
-window on it.
+The surface is seven tools, named by what they do and which kind of memory they
+touch: **set** records one statement, **get** answers a question about what was
+remembered, **forget** removes one statement, and **set_memory_handoff** replaces
+this project's previous handoff. The only decision an agent makes is which kind of
+memory it is writing — this project's or the account's — because that is the one
+thing that decides who can read it.
+
+No tool returns a whole memory. A read takes a query and answers it from the
+statements that matched, because a memory grows and handing one to a model whole
+would spend the context window on the file instead of on the work.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from .instructions import SERVER_INSTRUCTIONS
 from .models import DEFAULT_EMBEDDING_MODEL, LocalEmbedder, LocalReranker, ModelError
 from .retrieval import Retrieval, RetrievalSettings
 from .store import (
+    DEFAULT_KIND,
     StoreError,
 )
 
@@ -72,16 +77,41 @@ ContentParameter = Annotated[
         )
     ),
 ]
-TypeParameter = Annotated[
+KindParameter = Annotated[
+    str,
+    Field(
+        default=DEFAULT_KIND,
+        description=(
+            "The kind to file it under: one word in block letters, no white "
+            "space. RULE for an instruction or a standing fact, PLAN for what the "
+            "project is meant to be or achieve, PREFERENCE for what the user "
+            "likes, CORRECTION for something to stop doing, and any other word if "
+            "the statement fits one better. The same word for the same kind of "
+            "thing, because a read filtered by kind returns everything filed under "
+            "it. If nothing fits, ITEM: it is a kind like any other and a "
+            "statement filed under it is found by asking for it. Case is recorded "
+            "in block letters. Nothing here interprets the word."
+        ),
+    ),
+]
+ForgetParameter = Annotated[
     str,
     Field(
         description=(
-            "The category to file it under: one run of block letters, no white "
-            "space, e.g. 'RULE', 'PLAN', 'PREFERENCE'. Reuse a category you have "
-            "already used, so a query naming it finds every statement filed there. "
-            "This server defines no categories and interprets none. The label is "
-            "recorded and searchable, and is not returned on recall. Any case is "
-            "recorded in block letters."
+            "The exact `text` of the one statement to remove, as a read returned "
+            "it: not a summary, not a fragment, and not the kind. The match is on "
+            "those words and never on meaning, so it removes that statement or "
+            "nothing."
+        )
+    ),
+]
+HandoffParameter = Annotated[
+    str,
+    Field(
+        description=(
+            "This session's handoff, in a few sentences: what is done, what is in "
+            "flight, and what the next session does first. It replaces the previous "
+            "handoff in this project."
         )
     ),
 ]
@@ -93,6 +123,17 @@ QueryParameter = Annotated[
             "their words and by their meaning. Required: this server answers a "
             "question rather than returning a memory whole."
         )
+    ),
+]
+KindFilterParameter = Annotated[
+    str | None,
+    Field(
+        default=None,
+        description=(
+            "Return only the statements filed under this kind, one word in block "
+            "letters. A kind is a column of the record and not part of a "
+            "statement's words, so it is asked for here rather than searched for."
+        ),
     ),
 ]
 LimitParameter = Annotated[
@@ -178,54 +219,105 @@ def create_server(
 
     @server.tool(name="set_memory_global", annotations=WRITE_ANNOTATIONS)
     def set_memory_global(
-        content: ContentParameter, type: TypeParameter
+        content: ContentParameter, kind: KindParameter = DEFAULT_KIND
     ) -> dict[str, Any]:
-        """Remember one typed statement that applies everywhere this account works.
+        """Records one statement that applies everywhere on this account.
 
-        Use it for what is true of the user, and for a standing instruction they
-        gave: those belong in every project, so they go here and nowhere else.
-        Appended to the global standing document, which the user and the browser
-        view can edit.
+        What is true of the user, and an instruction they gave once and mean
+        everywhere, go here. It goes to the top of the account's memory, and every
+        project on this account can read it.
         """
-        directory = config.global_directory
-        return _recorded(engine, "global", directory, content, type)
+        return _recorded(engine, "global", config.global_directory, content, kind)
 
     @server.tool(name="set_memory_local", annotations=WRITE_ANNOTATIONS)
     def set_memory_local(
-        content: ContentParameter, type: TypeParameter
+        content: ContentParameter, kind: KindParameter = DEFAULT_KIND
     ) -> dict[str, Any]:
-        """Remember one typed statement for this project only.
+        """Records one statement about this project.
 
-        Use it for what is true here — a decision, a path, a convention — and not
-        for anything the user said applies everywhere. Appended to this project's
-        standing document, inside the repository under `.memory-rag`, so it
-        travels with the project.
+        A decision, a path, a convention, or anything else that is true here and
+        would be wrong in another project goes here. It goes to the top of this
+        project's memory, inside the repository under `.memory-rag`, and travels
+        with the project.
         """
-        return _recorded(engine, "local", config.local_directory, content, type)
+        return _recorded(engine, "local", config.local_directory, content, kind)
 
     @server.tool(name="get_memory_global", annotations=READ_ONLY_ANNOTATIONS)
     def get_memory_global(
         query: QueryParameter,
         limit: LimitParameter = DEFAULT_RESULT_LIMIT,
+        kind: KindFilterParameter = None,
     ) -> dict[str, Any]:
-        """Recall what applies everywhere this account works.
+        """Returns the account's statements that match a query.
 
-        Answers from the statements in the account's one global memory that match
-        the query, shared by every project on this storage root.
+        It matches by words and by meaning, and returns the statements themselves
+        rather than an answer to a question about them. Each one comes with its
+        kind, when it was added, and how often it has been recalled.
         """
-        return _answer(engine, "global", config.global_directory, query, limit)
+        return _answer(
+            engine,
+            "global",
+            config.global_directory,
+            query,
+            limit,
+            kind,
+        )
 
     @server.tool(name="get_memory_local", annotations=READ_ONLY_ANNOTATIONS)
     def get_memory_local(
         query: QueryParameter,
         limit: LimitParameter = DEFAULT_RESULT_LIMIT,
+        kind: KindFilterParameter = None,
     ) -> dict[str, Any]:
-        """Recall what is true about this project.
+        """Returns this project's statements that match a query.
 
-        Answers from the statements in this project's memory that match the query,
-        nearest first. No other project's memory is reachable from here.
+        It matches by words and by meaning, and returns the statements themselves
+        rather than an answer to a question about them. Each one comes with its
+        kind, when it was added, and how often it has been recalled. No other
+        project's memory is reachable from here.
         """
-        return _answer(engine, "local", config.local_directory, query, limit)
+        return _answer(
+            engine,
+            "local",
+            config.local_directory,
+            query,
+            limit,
+            kind,
+        )
+
+    @server.tool(name="forget_memory_global", annotations=WRITE_ANNOTATIONS)
+    def forget_memory_global(text: ForgetParameter) -> dict[str, Any]:
+        """Removes one statement from the account's memory.
+
+        Pass the exact `text` a read returned. The match is on those words and
+        never on meaning, so it removes that statement or nothing; if the text
+        matches more than one statement, nothing is removed and the answer names
+        them.
+        """
+        return _forgotten(engine, config.global_directory, text)
+
+    @server.tool(name="forget_memory_local", annotations=WRITE_ANNOTATIONS)
+    def forget_memory_local(text: ForgetParameter) -> dict[str, Any]:
+        """Removes one statement from this project's memory.
+
+        Pass the exact `text` a read returned. The match is on those words and
+        never on meaning, so it removes that statement or nothing; if the text
+        matches more than one statement, nothing is removed and the answer names
+        them.
+        """
+        return _forgotten(engine, config.local_directory, text)
+
+    @server.tool(name="set_memory_handoff", annotations=WRITE_ANNOTATIONS)
+    def set_memory_handoff(content: HandoffParameter) -> dict[str, Any]:
+        """Records this session's handoff, replacing the previous one.
+
+        One statement at the top of this project's memory, under the kind
+        `HANDOFF`. The previous handoff is removed as part of the same call, so a
+        project holds one rather than a list, and `replaced` in the answer is how
+        many went. Write what the next session needs to pick the work up: what is
+        done, what is in flight, and what to do first.
+        """
+        return _handed_off(engine, config.local_directory, content)
 
     return server
 
@@ -235,7 +327,7 @@ def _recorded(
     scope: str,
     directory: Path,
     content: str,
-    statement_type: str,
+    kind: str,
 ) -> dict[str, Any]:
     """Record one typed statement, reporting what the semantic side has queued.
 
@@ -247,7 +339,25 @@ def _recorded(
 
     del scope
     try:
-        return engine.record(directory, content, statement_type)
+        return engine.record(directory, content, kind)
+    except ModelError as error:
+        raise ToolError(str(error)) from error
+
+
+def _forgotten(engine: Retrieval, directory: Path, text: str) -> dict[str, Any]:
+    """Remove the one statement this text is exactly, or refuse to remove any."""
+
+    try:
+        return engine.forget(directory, text)
+    except ModelError as error:
+        raise ToolError(str(error)) from error
+
+
+def _handed_off(engine: Retrieval, directory: Path, content: str) -> dict[str, Any]:
+    """Put this session's handoff on top, and report the one it replaced."""
+
+    try:
+        return engine.handoff(directory, content)
     except ModelError as error:
         raise ToolError(str(error)) from error
 
@@ -258,13 +368,14 @@ def _answer(
     directory: Path,
     query: str,
     limit: int,
+    kind: str | None = None,
 ) -> dict[str, Any]:
     """Answer one read, and refuse the one question a read must not answer.
 
     An empty query is refused rather than answered with everything, because a
-    memory grows by appending and handing one to a model whole spends the context
-    window on the file. The answer also reports when a file was edited behind our
-    back, which is what ``memory-ultra-rag-reindex`` is for.
+    memory grows and handing one to a model whole spends the context window on it.
+    The answer also reports when the document was rewritten from the record, which
+    is how a hand edit to an export is disclosed rather than quietly lost.
     """
 
     if not str(query or "").strip():
@@ -276,7 +387,11 @@ def _answer(
     capped = max(1, min(int(limit), MAX_RESULT_LIMIT))
     try:
         return engine.answer(
-            scope=scope, directory=directory, query=str(query), limit=capped
+            scope=scope,
+            directory=directory,
+            query=str(query),
+            limit=capped,
+            kind=kind,
         )
     except (IndexError, StoreError) as error:
         raise ToolError(str(error)) from error

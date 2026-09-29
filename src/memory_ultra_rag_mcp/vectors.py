@@ -1,72 +1,37 @@
-"""One scope's vectors, in a file of their own.
+"""The vectors, in the same file as the index they answer for.
 
-The lexical index and this one are separated on purpose, because their
-economics are opposites. ``index.sqlite3`` is rebuilt in seconds and can be
-thrown away freely; this file costs one embedding per unit, so deleting it means
-re-embedding everything that was recorded, and it is therefore never deleted as
-part of anything else.
+One SQLite file per scope holds three things, and the reason they share a file is
+that they are all keyed by the same statement digest and read on the same answer:
+the FTS5 word index, the vector of every statement, and a statement's history.
+Keeping them together means one file to look at rather than three, one connection
+per read rather than two, and one schema version rather than two.
 
-The record is still the Markdown. This file holds a vector per unit, keyed by a
-digest of the unit's text, and a fingerprint of the model that produced it. A
-statement whose words are edited is a different digest, so its old vector
-becomes collectable rather than wrong, and an index built by one model is
-refused rather than mixed with another's.
+What is still true of the parts: the word index is derived from the Markdown and
+is re-read whenever the document changes, while the vectors and the history are
+not derived from anything and survive that re-read. A file whose table is not the
+shape this version writes is dropped and rebuilt rather than half-read, which is
+also what retires the vectors of statements that have since been reworded.
+
+The record is still the Markdown. This file holds nothing that a re-read of the
+document cannot restore except those two, and a statement is never in this file's
+power to lose.
 """
 
 from __future__ import annotations
 
-import hashlib
 import math
 import sqlite3
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Self
 
+from .index import index_path
+from .store import unit_key
+
 __all__ = [
-    "VECTORS_FILENAME",
     "VectorStore",
     "unit_key",
-    "vector_path",
 ]
-
-#: The vector file inside a scope directory, named so that it is obviously not
-#: part of the memory.
-VECTORS_FILENAME = "index-vectors.sqlite3"
-
-#: Floats are stored as 32-bit, which is what the models produce and what a
-#: cosine needs; keeping them wider would double the file for no gain.
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS vector(
-    unit_key TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
-    stamp TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    model TEXT NOT NULL,
-    dimension INTEGER NOT NULL,
-    components BLOB NOT NULL
-);
-CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
-"""
-
-
-def vector_path(scope_directory: Path) -> Path:
-    """Return the vector file for one scope."""
-
-    return scope_directory / VECTORS_FILENAME
-
-
-def unit_key(text: str) -> str:
-    """Return the stable identity of one unit.
-
-    A digest of the unit's own words, not of its position: a block ordinal
-    shifts when a hand edit inserts a block above it, and a vector keyed on
-    position would then be silently attached to the wrong statement. Two units
-    with the same words are the same unit as far as an answer is concerned, so
-    they share one vector.
-    """
-
-    normalised = " ".join(text.casefold().split())
-    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 
 class VectorStore:
@@ -76,7 +41,7 @@ class VectorStore:
         self.scope_directory = scope_directory
         self.model = model
         self.dimension = dimension
-        self.path = vector_path(scope_directory)
+        self.path = index_path(scope_directory)
         self._connection: sqlite3.Connection | None = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -84,10 +49,15 @@ class VectorStore:
     def _open(self) -> sqlite3.Connection:
         if self._connection is not None:
             return self._connection
+        from .index import MemoryIndex
+
         self.scope_directory.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, check_same_thread=False)
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.executescript(_SCHEMA)
+        # The schema is the index's to keep: one file, one version, and a file
+        # whose vector table is not the shape this version writes is dropped
+        # there rather than half-read here.
+        MemoryIndex(self.scope_directory)._ensure_schema(connection)
         self._connection = connection
         return connection
 
@@ -109,17 +79,20 @@ class VectorStore:
 
     def put(
         self,
-        text: str,
+        key: str,
         vector: Sequence[float],
         *,
-        source: str,
         stamp: str,
         kind: str,
     ) -> str:
-        """Store one unit's vector, and return its key.
+        """Store one statement's vector under its own key, and return that key.
 
-        The recorded model and width are checked before the write, so a stale
-        file from another model is never appended to silently.
+        The key is the record's, not a digest of the text embedded: the text of a
+        statement no longer carries its type, so a digest of it would be a different
+        identity from the row it belongs to, and the vector would answer for nothing.
+
+        The recorded model and width are checked before the write, so a stale file
+        from another model is never appended to silently.
         """
 
         if len(vector) != self.dimension:
@@ -129,14 +102,12 @@ class VectorStore:
             )
         connection = self._open()
         self._refuse_foreign_model(connection)
-        key = unit_key(text)
         connection.execute(
             "INSERT OR REPLACE INTO vector"
-            "(unit_key, source, stamp, kind, model, dimension, components) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(unit_key, stamp, kind, model, dimension, components) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 key,
-                source,
                 stamp,
                 kind,
                 self.model,

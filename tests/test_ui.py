@@ -148,9 +148,11 @@ def test_the_standing_document_is_written_only_when_it_still_matches(
 
     assert saved["status"] == "saved"
     assert saved["sha256"]
-    assert "changed since it was read" in refusal
-    assert read_standing(config.local_directory).endswith(
-        "Remember the thesis deadline.\n"
+    assert "changed since this page was loaded" in refusal
+    # The page's text became a statement, and the file is the export of it: a
+    # heading, a blank line, and the memory itself.
+    assert read_standing(config.local_directory) == (
+        "# MEMORY\n\nRemember the thesis deadline.\n"
     )
 
 
@@ -241,5 +243,5 @@ def test_the_routes_serve_the_view(tmp_path: Path) -> None:
     assert appended.status_code == 409
     assert saved.json()["status"] == "saved"
     assert (config.local_directory / "MEMORY.md").read_text(encoding="utf-8") == (
-        "# MEMORY\nKept for the thesis.\n"
+        "# MEMORY\n\nKept for the thesis.\n"
     )

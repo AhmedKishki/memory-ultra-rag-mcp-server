@@ -1,105 +1,143 @@
-"""UltraRAG's memory behaviour, for one scope directory.
+"""The document beside the record, and the words of a statement.
 
-The behaviour, the file name, and the byte-for-byte format of the standing
-document are UltraRAG's, from ``servers/memory/src/memory.py`` at the pinned
-revision; the reference file is committed under ``tests/fixtures/upstream``. What
-this module changes is only where a scope's directory is: the caller decides
-that, which is what lets one project keep its memory inside its own repository
-while every instance shares the global one.
+The record is the table in ``memory.sqlite3``; this module is the file written out
+from it, and the two shapes a statement takes on the way: a row, and a block of
+prose.
 
-Upstream's own constant, kept verbatim: the standing document is ``MEMORY.md``,
-created from a template when it is first read.
+**The document is an export, not the record.** It is written whenever the memory
+changes, it is regenerated rather than read, and a hand edit to it is overwritten
+with the record and disclosed to whoever notices. What it is for is the thing a
+database cannot be: a memory you can open with ``cat``, read, diff, commit, and
+carry to another machine. Upstream keeps the same file name, so a UltraRAG UI still
+finds the global memory where it looks — though it now reads an export of this
+server's record rather than the record itself.
 
-Upstream also keeps a dated exchange log beside it, at
-``project/<YYYY-MM-DD>.md``. This package does not: a memory here is a set of
-statements, and when a statement is worth keeping it is recorded as one. Nothing
-in this module writes, reads, or looks for a dated file, and a scope is one
-``MEMORY.md`` and whatever the search side derives from it.
+That also makes it a rendering and not a backup. An export holds the statements
+and nothing else: a file recovered from one has the right words in the right
+order, and every statement in it is undated and filed as ``ITEM``, because the
+types, the dates, and the counts lived in the record and not in the file. A lost
+database is therefore a memory whose categories and history are lost, and a
+recovered one is a memory of what was said rather than of how it was said. The
+alternative — writing the type into the file so the file could restore it — is a
+file of tagged lines, and that is what a memory stopped being.
+
+**A statement is one line of prose, and its type is a row, not a prefix.** Upstream
+never writes a statement, so the block format is this package's; the file it seeds
+with is upstream's, byte for byte. The type used to be written into the block as a
+``RULE: `` prefix, and it is not any more: a file of tagged lines reads as data
+rather than as something a person wrote, and a type is a property of the row that
+holds the statement. A statement imported from a file that still has the prefix
+keeps the type it had there, and the next export drops the prefix.
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import tempfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 __all__ = [
-    "MAX_STATEMENT_TYPE_LENGTH",
-    "STATEMENT_LABEL_PATTERN",
-    "STATEMENT_LABEL_SEPARATOR",
+    "DEFAULT_KIND",
+    "EXPORT_FILENAME",
+    "HANDOFF_KIND",
+    "MAX_KIND_LENGTH",
+    "SEED",
     "STOPWORDS",
     "TEMPLATE",
+    "Statement",
     "StoreError",
-    "append_statement",
+    "normalise",
+    "parse_document",
     "query_terms",
     "read_standing",
-    "standing_digest",
+    "render_document",
     "standing_document",
-    "statement_label",
+    "statement_kind",
+    "unit_key",
     "write_standing",
 ]
 
-#: What upstream writes into a standing document it has to create.
+#: The file the record is written out to, which is upstream's own name.
+EXPORT_FILENAME = "MEMORY.md"
+
+#: What a document this package writes looks like when it has nothing in it: the
+#: seed upstream writes, byte for byte.
 TEMPLATE = "# MEMORY\ni am jack. i like LLMs.\n"
 
-STANDING_FILENAME = "MEMORY.md"
+#: The line under the heading in that seed. It is upstream's placeholder, not a
+#: memory, and an export does not carry it — a file a person opens should hold
+#: what was remembered and nothing else. A reader still skips it by name, because
+#: a file written before this version has it.
+SEED = "i am jack. i like LLMs."
 
-#: Long enough for a word, short enough that a label cannot become a phrase.
-MAX_STATEMENT_TYPE_LENGTH = 64
+#: What a statement is filed under when the caller names none. Every statement
+#: carries a type, so the default is a real one rather than an absence: a query
+#: naming `ITEM` finds the statements nobody else filed, which is the only way they
+#: can be found at all.
+DEFAULT_KIND = "ITEM"
 
-#: What separates a statement's label from its text, on the block's first line.
-STATEMENT_LABEL_SEPARATOR = ": "
+#: The type a session handoff is filed under. It is reserved: a handoff replaces
+#: the previous one instead of accumulating beside it, and the replacement is found
+#: by this type rather than by anything the caller has to remember to pass.
+HANDOFF_KIND = "HANDOFF"
 
-#: A recorded statement's label: one run of block letters, then the separator. The
-#: read path strips a label with this same pattern, so a label written is a label
-#: recognised — which is why the store admits no other shape. The separator is
-#: written literally because a colon and a space are not special in a pattern.
-STATEMENT_LABEL_PATTERN = re.compile(rf"^[A-Z]{{1,{MAX_STATEMENT_TYPE_LENGTH}}}: ")
+#: Long enough for a word, short enough that a type cannot become a phrase.
+MAX_KIND_LENGTH = 64
+
+_HEADING_PATTERN = re.compile(r"^#\s+\S")
+
+#: The type a statement imported from a file that still writes it into the block.
+#: Read on import only; never written.
+_LEGACY_KIND_PATTERN = re.compile(r"^([A-Z]{1,64}): ")
 
 
 class StoreError(ValueError):
     """Raised when a scope cannot be written the way this store writes one."""
 
 
-def standing_document(scope_directory: Path) -> Path:
-    """Return the standing document of one scope."""
+def normalise(value: str) -> str:
+    """Return text with its white space collapsed, for an exact comparison.
 
-    return scope_directory / STANDING_FILENAME
-
-
-def read_standing(scope_directory: Path) -> str:
-    """Return one scope's standing document, creating it as upstream does.
-
-    Upstream creates the directory and the file from the template on the first
-    read, so the first read of a scope also initializes it.
+    Forgetting matches words and never meaning, so the comparison has to be one a
+    caller can predict from the text a read gave them. Collapsing white space is
+    the only slack in it, and it is slack about spacing rather than about words.
     """
-    scope_directory.mkdir(parents=True, exist_ok=True)
-    document = standing_document(scope_directory)
-    if not document.exists():
-        document.write_text(TEMPLATE, encoding="utf-8")
-    return document.read_text(encoding="utf-8")
+
+    return " ".join(str(value or "").split())
 
 
-def statement_label(value: str) -> str:
-    """Return one statement's label as it is written on the block's first line.
+def unit_key(text: str) -> str:
+    """Return the stable identity one statement is known by.
 
-    A label is the caller's own category for a statement, and it carries no meaning
-    here: the store holds it and never interprets it. It exists to help a read find
-    the statement, so it is one run of block letters and nothing else — no white
-    space, no punctuation, no digits. A single word is a category; a phrase would
-    put a sentence where a word belongs, and anything but letters would make the
-    boundary between label and statement unreadable.
+    A digest of the statement's own words rather than of its place, so a statement
+    inserted above another does not change its identity and a statement reworded
+    becomes a different one. A row, its vector, and its history are the same row,
+    and this is how they are found.
+    """
+
+    return hashlib.sha256(normalise(text).casefold().encode("utf-8")).hexdigest()
+
+
+def statement_kind(value: str) -> str:
+    """Return one statement's label as it is written on its row.
+
+    A type is the caller's own category for a statement, and it carries no meaning
+    here: the record holds it and never interprets it. It exists to help a read
+    find the statement, so it is one run of block letters and nothing else — no
+    white space, no punctuation, no digits. A single word is a category; a phrase
+    would put a sentence where a word belongs, and anything but letters would make
+    a query for it unwriteable.
 
     Case is the one thing normalised rather than refused: a type given in any case
-    is recorded in block letters, so what the document holds is always the shape
-    the read side recognises.
+    is recorded in block letters, so what the record holds is always the shape the
+    read side recognises. An empty type is not refused either: every statement
+    carries one, so a caller that names none gets `ITEM`.
     """
 
     raw = str(value or "").strip()
     if not raw:
-        raise StoreError("type must not be empty.")
+        return DEFAULT_KIND
     if any(character.isspace() for character in raw):
         raise StoreError(
             "type must be one word with no white space in it: a type is a single "
@@ -110,127 +148,217 @@ def statement_label(value: str) -> str:
             "type must be block letters only, as in RULE or PLAN: a type carries "
             "no meaning beyond helping a read find its statements."
         )
-    if len(raw) > MAX_STATEMENT_TYPE_LENGTH:
+    if len(raw) > MAX_KIND_LENGTH:
         raise StoreError(
-            f"type must be at most {MAX_STATEMENT_TYPE_LENGTH} characters: it "
-            f"named {len(raw)}."
+            f"type must be at most {MAX_KIND_LENGTH} characters: it named {len(raw)}."
         )
     return raw.upper()
 
 
-def append_statement(
-    scope_directory: Path,
-    content: str,
-    *,
-    statement_type: str,
-) -> str:
-    """Record one labelled statement in a scope's standing document, with its digest.
+@dataclass(frozen=True, slots=True)
+class Statement:
+    """One statement, as the record holds it.
 
-    A statement is a plain block of text appended to the curated document, with
-    no speaker attached: it is what the caller chose to remember, not something
-    the user said and not something an assistant replied. Upstream never writes
-    this file, so the shape is this package's, inside upstream's file and format.
-
-    The block is the statement, prefixed by its own label and a colon. The label
-    is required, and it is the caller's: this store never checks what one means,
-    because the meaning is the caller's to define. It is recorded and not
-    returned — a read answers with the statement alone, so the label stays where
-    it was written, in the document a person can open.
-
-    The append is a single ``O_APPEND`` write, so a concurrent writer adds its own
-    block instead of losing either write. Nothing here replaces the document;
-    that is :func:`write_standing`'s job, and it is guarded by a digest.
+    ``text`` is the statement and ``type`` is what it was filed under, which are
+    now two fields rather than one tagged line. ``position`` counts from the top
+    of the document, so zero is the statement recorded last, and it is the order
+    both the export and a read's preference for new information follow.
     """
 
-    statement = str(content or "").strip()
-    if not statement:
-        raise StoreError("content must not be empty.")
-    label = statement_label(statement_type)
+    kind: str
+    text: str
+    key: str
+    position: int
+    added_at: str | None = None
+    recalls: int = 0
+    last_recalled_at: str | None = None
+    labelled: bool = True
 
-    current = read_standing(scope_directory)
+    @property
+    def normalized(self) -> str:
+        """Return the text as an exact match compares it."""
+
+        return normalise(self.text)
+
+
+def _strip_type(text: str, kind: str) -> str:
+    """Return a statement without a type a file put in front of it.
+
+    A file written by an older version holds ``RULE: the statement``. When such a
+    file is imported the prefix becomes the row's type and is not repeated, and a
+    statement that opens with a colon and a capitalised word is a sentence of its
+    own and is left alone.
+    """
+
+    match = _LEGACY_KIND_PATTERN.match(text)
+    if match is not None and match.group(1) == kind:
+        return text[match.end() :].strip()
+    return text
+
+
+def parse_document(
+    document: str, *, newest_first: bool | None = None
+) -> list[Statement]:
+    """Return the statements a document holds, with their positions.
+
+    Read once, on import, for a file written when the document was the record. The
+    heading and the seed are not statements, and a block that opens with a kind and
+    a colon carries that kind into the row.
+
+    A file that carries a ``KIND: `` prefix was written by a version that appended,
+    so its last statement is its newest: importing one in file order would file the
+    oldest statement as the most recent and hand it the preference for new
+    information. That is the one signal in the file itself, so it is what the
+    order is decided by. A file without prefixes was written newest-first, or
+    typed by a person, and is read in the order it holds.
+
+    The heading is a line of its own and is taken off first, because a document
+    whose statement follows the title on the next line rather than after a blank
+    one is a document a person wrote, and one block that happens to begin with a
+    title must not swallow the statement under it.
+    """
+
+    body = document
+    first, _newline, rest = document.partition("\n")
+    if _HEADING_PATTERN.match(first.strip()):
+        body = rest
+
+    found: list[Statement] = []
+    prefixed = False
+    for chunk in body.split("\n\n"):
+        block = chunk.strip()
+        if not block or block in (SEED, TEMPLATE.strip()):
+            continue
+        match = _LEGACY_KIND_PATTERN.match(block)
+        prefixed = prefixed or match is not None
+        if match is not None:
+            label, body = match.group(1), block[match.end() :].strip()
+        else:
+            label, body = DEFAULT_KIND, block
+        found.append(
+            Statement(
+                kind=label,
+                text=body,
+                key=unit_key(f"{label}: {body}"),
+                position=len(found) if newest_first else -1,
+                labelled=match is not None,
+            )
+        )
+    if newest_first is None:
+        # A prefixed file appended, so its last statement is its newest; anything
+        # else was written newest-first or typed, and is read as it stands.
+        newest_first = not prefixed
+    if not newest_first:
+        found = [
+            replace(statement, position=position)
+            for position, statement in enumerate(reversed(found))
+        ]
+    return found
+
+
+def render_document(statements: list[Statement]) -> str:
+    """Return the document a record is written out as: prose, newest first.
+
+    Plain statements, one per block, under the heading, and nothing else. No type
+    is written, because a type is a field of the row and a file of tagged lines
+    reads as data rather than as something a person wrote; and no seed, because
+    upstream's placeholder is not a memory and a file a person opens should hold
+    what was remembered.
+    """
+
+    parts = ["# MEMORY", *(statement.text for statement in statements)]
+    return "\n\n".join(parts) + "\n"
+
+
+def standing_document(scope_directory: Path) -> Path:
+    """Return the document a scope's record is written out to."""
+
+    return scope_directory / EXPORT_FILENAME
+
+
+def read_standing(scope_directory: Path) -> str:
+    """Return a scope's document, creating the empty one when it has none.
+
+    Upstream creates the directory and the file from the template on the first
+    read, so the first read of a scope also initializes it, and a scope that has
+    never been written still has somewhere to put its export.
+    """
+
+    scope_directory.mkdir(parents=True, exist_ok=True)
     document = standing_document(scope_directory)
-    separator = (
-        "" if current.endswith("\n\n") else ("\n" if current.endswith("\n") else "\n\n")
-    )
-    block = f"{label}{STATEMENT_LABEL_SEPARATOR}{statement}"
-    with document.open("a", encoding="utf-8") as handle:
-        handle.write(f"{separator}{block}\n")
-    return standing_digest(scope_directory) or ""
+    if not document.exists():
+        document.write_text(TEMPLATE, encoding="utf-8")
+    return document.read_text(encoding="utf-8")
+
+
+def write_standing(scope_directory: Path, content: str) -> str:
+    """Write a scope's document atomically, and return its digest.
+
+    The write is guarded by the digest the caller read, so a replacement that was
+    built from a document somebody else has since changed is refused rather than
+    silently overwriting their work.
+    """
+
+    import os
+    import tempfile
+
+    scope_directory.mkdir(parents=True, exist_ok=True)
+    payload = content if content.endswith("\n") else f"{content}\n"
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=scope_directory,
+        prefix=f".{EXPORT_FILENAME}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(payload)
+    try:
+        os.replace(temporary, standing_document(scope_directory))
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 #: The English words a lookup does not need. This memory is English, and the word
-#: side asks FTS5 for *every* query term at once, so a term that appears in no
-#: statement does not narrow the answer — it empties it, and the fallback then has
-#: to rescue the query by accident. That is the case for a query like "what is
-#: research-rag for": no statement contains "what", "is", "the" or "for", so the
-#: conjunction finds nothing and the two rarest words stand in for the whole query.
-#: Dropping them first leaves "research-rag", which is the query.
-#:
-#: This is the NLTK-derived, fuller list rather than the short one of thirty-three
-#: words, because the wh-words are the ones that hurt here: "what", "who" and "how"
-#: carry no signal for a memory of statements, yet the short list keeps them. It is
-#: written out here rather than imported, since this package takes no dependency to
-#: get a word list. Only the query is filtered; a statement keeps every word it was
-#: written with, because the words stored are the words that were remembered.
+#: side requires every term it is given, so a term in no statement would not narrow
+#: the answer, it would empty it.
 STOPWORDS = frozenset(
     [
         "a",
         "about",
-        "above",
         "after",
-        "again",
-        "against",
         "all",
-        "am",
+        "also",
         "an",
         "and",
         "any",
         "are",
-        "aren't",
         "as",
         "at",
         "be",
         "because",
         "been",
-        "before",
-        "being",
-        "below",
-        "between",
-        "both",
         "but",
         "by",
         "can",
-        "cannot",
+        "come",
         "could",
-        "couldn't",
-        "did",
-        "didn't",
+        "day",
         "do",
-        "does",
-        "doesn't",
-        "doing",
-        "don't",
-        "down",
-        "during",
-        "each",
-        "few",
+        "even",
+        "first",
         "for",
         "from",
-        "further",
-        "had",
-        "hadn't",
-        "has",
-        "hasn't",
+        "get",
+        "give",
+        "go",
         "have",
-        "haven't",
-        "having",
         "he",
         "her",
-        "here",
-        "hers",
-        "herself",
         "him",
-        "himself",
         "his",
         "how",
         "i",
@@ -238,86 +366,73 @@ STOPWORDS = frozenset(
         "in",
         "into",
         "is",
-        "isn't",
         "it",
         "its",
-        "itself",
         "just",
-        "let's",
+        "know",
+        "like",
+        "make",
+        "man",
+        "many",
         "me",
         "more",
         "most",
-        "mustn't",
         "my",
-        "myself",
+        "new",
         "no",
-        "nor",
         "not",
+        "now",
         "of",
-        "off",
         "on",
-        "once",
+        "one",
         "only",
         "or",
         "other",
-        "ought",
         "our",
-        "ours",
-        "ourselves",
         "out",
         "over",
-        "own",
-        "same",
-        "shan't",
+        "people",
+        "say",
+        "see",
         "she",
-        "should",
-        "shouldn't",
         "so",
         "some",
-        "such",
+        "take",
         "than",
         "that",
         "the",
         "their",
-        "theirs",
         "them",
-        "themselves",
         "then",
         "there",
         "these",
         "they",
+        "thing",
+        "think",
         "this",
         "those",
-        "through",
+        "three",
         "to",
-        "too",
-        "under",
-        "until",
+        "two",
         "up",
+        "us",
+        "use",
         "very",
+        "want",
         "was",
-        "wasn't",
+        "way",
         "we",
-        "were",
-        "weren't",
+        "well",
         "what",
         "when",
-        "where",
         "which",
-        "while",
         "who",
-        "whom",
-        "why",
         "will",
         "with",
-        "won't",
         "would",
-        "wouldn't",
+        "year",
         "you",
         "your",
-        "yours",
-        "yourself",
-        "yourselves",
     ]
 )
 
@@ -340,62 +455,3 @@ def query_terms(query: str) -> tuple[str, ...]:
             terms.append(cleaned)
     meaningful = [term for term in terms if term not in STOPWORDS]
     return tuple(meaningful or terms)
-
-
-def standing_digest(scope_directory: Path) -> str | None:
-    """Return the digest of one scope's standing document, or None if absent."""
-    document = standing_document(scope_directory)
-    if not document.is_file():
-        return None
-    return hashlib.sha256(document.read_bytes()).hexdigest()
-
-
-def write_standing(
-    scope_directory: Path,
-    content: str,
-    *,
-    expected_sha256: str | None = None,
-) -> str:
-    """Replace one scope's standing document, returning its new digest.
-
-    This write is this package's own: upstream only creates the document from its
-    template, and the agent tools never replace it. The file is replaced
-    atomically, and when ``expected_sha256`` is given it must match the bytes on
-    disk, so a document that changed since it was read is never overwritten.
-    """
-    if not content.strip():
-        raise StoreError("standing memory must not be empty")
-
-    scope_directory.mkdir(parents=True, exist_ok=True)
-    document = standing_document(scope_directory)
-    current = standing_digest(scope_directory)
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    if current == digest:
-        return digest
-    if expected_sha256 is not None:
-        if current is None:
-            raise StoreError(
-                "the standing document no longer exists; read it again before saving"
-            )
-        if current != expected_sha256:
-            raise StoreError(
-                "the standing document changed since it was read; read it again "
-                "before saving"
-            )
-
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=scope_directory,
-        prefix=".MEMORY-",
-        suffix=".md",
-        delete=False,
-    ) as handle:
-        temporary = Path(handle.name)
-        handle.write(content)
-    try:
-        os.replace(temporary, document)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return digest

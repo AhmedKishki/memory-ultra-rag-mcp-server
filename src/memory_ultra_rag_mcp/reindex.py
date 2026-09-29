@@ -118,6 +118,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"memory-ultra-rag-reindex: {error}", file=sys.stderr)
 
     try:
+        # `rebuild_scopes` uses the worker only when there is one scope, because a
+        # worker writes into the file of the scope it was built for.
         report = rebuild_scopes(
             scopes,
             retrieval.embedder if retrieval is not None else None,

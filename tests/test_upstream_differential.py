@@ -39,7 +39,7 @@ QUESTION = "Where does the draft live?"
 STATEMENT = "The draft lives in the project directory."
 #: The type this side records a statement under. Upstream has no such parameter,
 #: so this is a deliberate divergence, recorded in the README's choice table.
-STATEMENT_TYPE = "NOTE"
+STATEMENT_KIND = "NOTE"
 ANSWER = "In the project directory."
 
 
@@ -166,7 +166,7 @@ async def _exercise_ours(
         tools = sorted(tool.name for tool in await client.list_tools())
         await client.call_tool(
             "set_memory_global",
-            {"content": STATEMENT, "type": STATEMENT_TYPE},
+            {"content": STATEMENT, "kind": STATEMENT_KIND},
             raise_on_error=True,
         )
         await client.call_tool(
@@ -247,7 +247,7 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     our_standing, our_rounds = _written(our_storage)
     assert our_standing.decode().startswith(upstream_standing.decode())
     assert our_standing.decode().removeprefix(upstream_standing.decode()) == (
-        f"\n{STATEMENT_TYPE}: {STATEMENT}\n"
+        f"\n{STATEMENT_KIND}: {STATEMENT}\n"
     )
     # Upstream also keeps a dated exchange log, and this side keeps none: the
     # divergence the choice table records, asserted here so it cannot drift.
@@ -266,7 +266,7 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     # file upstream would have written it into, and without the type line it was
     # filed under: the label is recorded, and a read answers with the statement.
     assert [unit["text"] for unit in our_read["units"]] == [STATEMENT]
-    assert STATEMENT_TYPE not in str(our_read)
+    assert STATEMENT_KIND not in str(our_read)
     assert our_read["units"][0]["source"] == "MEMORY.md"
     assert our_read["truncated"] is False
     # The template upstream seeds a fresh standing document with is a seed, not
@@ -305,7 +305,7 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
         name: set(schemas)
         for name, schemas in (
             ("get_memory_global", {"query", "limit"}),
-            ("set_memory_global", {"content", "type"}),
+            ("set_memory_global", {"content", "kind"}),
         )
     }
     assert "user_id" not in our_parameters["get_memory_global"]

@@ -63,39 +63,54 @@ The first root is inside the project and the second is in the account's home, an
 
 One server instance serves one project, so `--project-root` binds the session: local memory always means that project's memory.
 
-## The four tools
+## The seven tools
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `get_memory_local` | `query`, `limit=10` | Answers a question from this project's memory. |
-| `set_memory_local` | `content`, `type` | Records one typed statement in this project's standing memory. |
-| `get_memory_global` | `query`, `limit=10` | Answers a question from the account's global memory. |
-| `set_memory_global` | `content`, `type` | Records one typed statement in the account's global standing memory. |
+| `get_memory_local` | `query`, `limit=10`, `kind` | Returns the statements in this project's memory that match `query`, optionally only those filed under `kind`. |
+| `get_memory_global` | `query`, `limit=10`, `kind` | Returns the statements in the account's memory that match `query`, optionally only those filed under `kind`. |
+| `set_memory_local` | `content`, `kind=ITEM` | Records one statement at the top of this project's memory. |
+| `set_memory_global` | `content`, `kind=ITEM` | Records one statement at the top of the account's memory. |
+| `forget_memory_local` | `query` | Removes the one statement this project's memory holds whose text is exactly `query`. |
+| `forget_memory_global` | `query` | Removes the one statement the account's memory holds whose text is exactly `query`. |
+| `set_memory_handoff` | `content` | Records this session's handoff for the next one, and removes the previous handoff. |
 
-Two verbs, two scopes, and the scope in the name, so the only decision an agent makes is whether a memory is this project's or the account's. There is no `user_id`: **one server is bound to one project**, and that project reaches exactly two memories — its own, inside its repository, and the one global memory, which belongs to the account and is shared by every project on the same storage root.
+Four verbs, and the scope in the name where there is one to name, so the only decision an agent makes is whether a memory is this project's or the account's. There is no `user_id`: **one server is bound to one project**, and that project reaches exactly two memories — its own, inside its repository, and the one global memory, which belongs to the account and is shared by every project on the same storage root. A handoff is only this project's, because a handoff is about a session of working in this project.
+
+**A kind is asked for, not searched for.** It is a column of the record, not a word in the statement, so `kind` on a read narrows the answer to one category and a query that merely names a category finds nothing. That is the honest answer: the words are not in the text.
+
+**Forgetting matches the words, never the meaning.** Pass the exact text a read gave you and that statement is removed; pass anything else and nothing is, and the answer says so. Two statements with the same text is also a refusal rather than a deletion of both, because a memory that can lose two statements to one vague query cannot be trusted with the user's decisions. A forgotten statement takes its own history with it, and it stops answering at once rather than at the next rebuild.
+
+**A handoff is one statement, not a list of them.** It is filed under the reserved kind `HANDOFF` at the top of the project's memory, and the previous handoff is removed as part of the same call, so the caller never has to know that an older one existed. `replaced` in the answer says how many went: it was still data, and the caller is entitled to know it is gone.
 
 **A read takes a query, and returns only what matched.** These memories grow by appending, so handing one to a model whole would spend the context window on the file instead of on the work. A read answers in three stages:
 
 1. **Words**, against an FTS5 index of the scope's own statements. Every query term is required together first, because a question like "where does the draft live" means that; if nothing holds them all, the two rarest words are tried alone, so an over-strict conjunction never answers with nothing. English stop words are dropped before either attempt — the word side requires every term it is given, so a term no statement contains does not narrow the answer, it empties it.
 2. **Meaning**, against the vector of every statement in the scope, by exact scan. A unit below a cosine floor of 0.72 is dropped, and if the best candidate itself is below the floor the whole dense side abstains rather than returning the nearest thing. A model that is not resident, or vectors built by a different model, are reported as unavailable instead of answered worse.
 3. **Order**, by weighted reciprocal rank fusion — lexical at 1.25, dense at 1.0, both over rank 60 — and then a local English cross-encoder reorders the first ten candidates, which is what a memory of one-line statements needs and what a single vector cannot do.
+4. **Recency**, last and only as a bonus. Every statement is dated when it is recorded, and among the statements that matched about as well, the newest is worth `recency_bonus` of its own score, the next half of that, and so on. At the default of ten per cent a materially better match still comes first and a close one does not; it is a knob rather than a guarantee, so `recency_bonus=1.0` means "the newest answer whatever it says" and `0.0` turns the preference off for a memory that must be reproducible from its scores alone.
 
 The answer carries:
 
 - the statements that matched, at most `limit` of them, best first;
 - `matched_by` on the answer and on each unit: words, meaning, or both, and `reranked` for the third stage;
-- `units_pending` for statements a hand edit has not embedded yet, `index_synced` when a read had to bring the index in step, and `unlabelled` for statements a person wrote without a type;
+- each statement's `kind`, `added_at`, `recalls`, and `last_recalled_at`, so a statement that has never come up can be told from one that comes up constantly, and `stamp`, its position counting from the top of the document;
+- `units_pending` for statements the record holds that have no vector yet, and `document_rewritten` when a read brought the document back in line with the record — which is how a hand edit to an export is disclosed rather than lost;
 - whether anything was left out, whether the meaning side was available at all, and how long the read took.
 
-Every unit names the document it came from. Nothing else is returned: no file, no document, no whole memory, and no way to ask for one. A statement's label is searchable but is not in the returned text.
+Every unit names the document it came from. Nothing else is returned: no file, no document, no whole memory, and no way to ask for one. The kind is returned as its own field, and the returned `text` is the statement itself, so a caller that recorded something gets back the words they recorded rather than the kind they filed them under.
 
-Two derived indexes sit beside the files and hold nothing the Markdown does not: `index.sqlite3` for words, rebuilt in seconds, and `index-vectors.sqlite3` for meaning, whose cost is one embedding per unit. A read that finds nothing changed costs the same whatever the memory holds — measured on this repository's corpus shape, a word query costs the same over 50,000 statements as over 1,000, and a vector scan is arithmetic over a few megabytes. The one cost that varies with the memory is the re-read a read performs after a hand edit, and it is paid once per edit. The record is still the Markdown, so either file can be deleted and rebuilt.
+Counting a recall is one `UPDATE` per statement answered, in the same SQLite transaction the answer was read from, so it is atomic without a temporary file and a read's own work stays proportional to what it returned rather than to what the memory holds.
 
-**You can edit the Markdown by hand, and a read keeps up.** A memory is a file you are meant to open, so a statement you type into `MEMORY.md` — or delete, or reword — is answerable on the next read, with no reindex and nothing to remember to run. Before it searches, a read checks whether the document changed; if it did, the file is re-read and the new statements are findable by their words immediately. The embedding of a newly added statement is the write side's background work, so it is findable by meaning a moment later — the answer says `index_synced: 1` and reports any not-yet-embedded statements as `units_pending`. This is cheap because a scope is one file: the check is a single fingerprint, measured at 17 microseconds, and re-reading a 15 KiB document about 2 ms, against a read of hundreds of milliseconds. `memory-ultra-rag-reindex` is still what embeds the pending vectors, or forces a full pass.
+One file sits beside the Markdown. `memory.sqlite3` is the word index and the vector index together, and it also holds what the Markdown cannot: a statement's date and how often it has been recalled. The word index inside it is rebuilt in seconds; the vectors and the counts are not rebuilt by anything. A read that finds nothing changed costs the same whatever the memory holds — measured on this repository's corpus shape, a word query costs the same over 50,000 statements as over 1,000, and a vector scan is arithmetic over a few megabytes. The one cost that varies with the memory is the re-read a read performs after a hand edit, and it is paid once per edit. The record is still the Markdown, so deleting the file costs a rebuild and a re-embedding and cannot lose a statement.
 
-**A write records one typed statement.** `set_*` appends the statement to the standing document as plain text, with no speaker attached to it: it is what you chose to remember, not something the user said and not something an assistant replied. A statement is the whole record, and nothing dates it.
+**Editing the document by hand changes nothing, and the read says so.** The document is an export of the record, so a line typed into it, or a line deleted from it, is not memory. A read writes the document out from the record and reports `document_rewritten: true`, so an edit that did not take is visible at the moment it is ignored. Statements change through `set_memory_*` and `forget_memory_*`, or through the page, and each of them changes the record first. A record with nothing in it adopts the document, which is how a memory written by an older version is recovered.
 
-**Every statement carries a type, and a read does not repeat it.** `type` is required and it is yours: this server defines no categories, checks none, and interprets none. It is one run of block letters — `RULE`, `PLAN`, `PREFERENCE` — with no white space and nothing else in it, written as the statement's own first words and a colon, so the document stays plain prose. It exists to help a read find what was filed under it, which is why it is indexed and embedded with the statement: a query naming the category finds them. It is not in the answer, because a caller that recorded a statement wants the statement back and not the label. Case is the one thing normalised rather than refused: `rule` is recorded as `RULE`.
+**A write records one typed statement, at the top.** `set_*` inserts the statement into the standing document as plain text, with no speaker attached to it: it is what you chose to remember, not something the user said and not something an assistant replied. It goes above everything already recorded, so the file reads newest first and a read can prefer new information. Two writers are serialised by a lock in the system temporary directory, so a record never lands in a file another record just rewrote, and the lock leaves nothing behind in the memory if a process dies holding it.
+
+**Every statement carries a kind.** It is the caller's: this server defines no categories, checks none, and interprets none. It is one run of block letters — `RULE`, `PLAN`, `PREFERENCE` — with no white space, held as a column of the record with the statement. It exists so a read can be narrowed to one category, which is why a read takes it as an argument. It is a field in the answer and not part of the returned text, because a caller that recorded a statement wants the statement back and not the kind it was filed under.
+
+**A missing kind is `ITEM`, not a gap.** The parameter is optional and defaults to `ITEM`, so every statement carries one even when the caller named none, and a read narrowed to `ITEM` finds the ones nobody else filed. A statement recovered from an export is `ITEM` too, because an export holds no kinds. Case is normalised rather than refused: `rule` is recorded as `RULE`.
 
 ```markdown
 RULE: The user's decision is final and is not revisited without being asked.
@@ -126,31 +141,43 @@ The shared page still asks for dated exchanges, because it fetches them under th
 ## Storage
 
 ```
-<project-root>/.memory-rag/MEMORY.md                  the project's standing memory
-<project-root>/.memory-rag/index.sqlite3              derived word index, disposable in seconds
-<project-root>/.memory-rag/index-vectors.sqlite3        derived vector index, disposable in a re-embedding
-<storage-root>/memory/default/MEMORY.md            the account's global standing memory
-<storage-root>/memory/default/index.sqlite3          derived word index, disposable in seconds
-<storage-root>/memory/default/index-vectors.sqlite3    derived vector index, disposable in a re-embedding
+<project-root>/.memory-rag/MEMORY.md                  the project's standing memory: the record
+<project-root>/.memory-rag/memory.sqlite3              word index, vectors, and each statement's history
+<storage-root>/memory/default/MEMORY.md            the account's global standing memory: the record
+<storage-root>/memory/default/memory.sqlite3          word index, vectors, and each statement's history
 ```
 
 The global memory lives in `memory/default/`: `memory` is UltraRAG's own directory name, and `default` is the user it names when none is given, which keeps the layout upstream's and keeps a UltraRAG UI able to read it. It is one memory, not one per user, and the tools take no identifier for it.
 
-A standing document holds statements, one block per write, after the template UltraRAG seeds it with:
+**The record is the table.** `memory.sqlite3` holds every statement: its text, the kind it was filed under, its place in the document, and when it was added and how often it has been recalled. The same table is the FTS5 word index, so a statement is stored once and found by words without a second copy to keep in step. A statement is one line of prose and a row — not a tagged line.
+
+`MEMORY.md` is an **export** of that record: the same statements as plain prose, newest first, rewritten whenever the memory changes and on a reindex. It is what a database cannot be — a memory you can open, read, diff, commit, and carry. It is not read as an input, so a hand edit to it is overwritten with the record and the read that notices says so, and it is a rendering rather than a backup: a file recovered from one has the right words in the right order, every statement undated and filed as `ITEM`, because the types, the dates, and the counts lived in the record.
+
+An empty scope, before anything is recorded, holds the template UltraRAG seeds a document with:
 
 ```markdown
 # MEMORY
 i am jack. i like LLMs.
 ```
 
-A statement is one block: a label, a colon, the text, and a blank line after it.
+**The newest statement is at the top**, so the file a person opens reads in the order things were remembered and a read can prefer what is new.
 
 ```markdown
 # MEMORY
-i am jack. i like LLMs.
 
-NOTE: The draft lives in docs/
+Always cite the commit that introduced a change.
+
+The draft lives in docs/
 ```
+
+The file no longer writes a kind in front of a statement, and no longer carries
+the seed. A file written by an older version is read once on upgrade — the
+`RULE: ` prefix becomes the row's kind and the words after it become the
+statement — and the next export has neither.
+
+`memory.sqlite3` beside it is the one file, and it is the record: an FTS5 table of every statement — its text, its kind, and its position — with a vector per statement for the meaning side, and four columns on the row itself for what the document cannot hold: `added_at`, `recalls`, and `last_recalled_at`. A statement is one row and not a row plus a file, and a read counts a recall by updating the rows it just returned, in the transaction it read them in. Nothing is written beside the memory and no thread is involved, and the counting is proportional to the answer rather than to the file.
+
+It is therefore *not* fully derived: deleting it costs a re-read of the document **plus** a re-embedding **plus** the dates and counts, and the last of those is the one thing no rebuild can restore. `memory-ultra-rag-reindex` collects the rows of statements that have since been reworded or removed, and the document itself is never in this file's power to lose. One file rather than three: the index, the vectors, and the history are all keyed by the same statement digest and all answer the same read, so one file means one schema version, one connection, and no way for two of them to disagree about one statement.
 
 The storage root is where global memory lives, and its default is in the account's home:
 
@@ -183,8 +210,8 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 1 | Local memory is kept inside the project, under `.memory-rag` | isolation is the point: a project's memory is private to that project and travels with it |
 | 2 | The project is bound at startup, and the project tools take no project argument | one session means one project, so local memory cannot be written into the wrong one |
 | 3 | Global memory keeps UltraRAG's layout in the storage tree | the shared memory stays where a UltraRAG UI already reads it |
-| 4 | The file names and formats are UltraRAG's, and the two kinds share one implementation | a project's memory and the global one have one shape, so either can be read the same way, and a UltraRAG UI already reads the global one |
-| 5 | The surface is four tools, and this server is not a UltraRAG pipeline node | UltraRAG's server base class registers a pipeline `build` tool, and its runner wires servers through generated `server.yaml` files and `output=` annotations. Both belong to a pipeline deployment, so this package ships neither and depends on no UltraRAG code: memory here is a complete solution for a project and an account, served to agents and people directly, not a stage inside someone else's pipeline |
+| 4 | The file name and the scope layout are UltraRAG's, and the two kinds share one implementation | a project's memory and the global one have one shape, so either can be read the same way, and a UltraRAG UI finds the global memory where it looks. What is in that file is now an export rather than the record — choice 33 |
+| 5 | The surface is seven memory tools, and this server is not a UltraRAG pipeline node | UltraRAG's server base class registers a pipeline `build` tool, and its runner wires servers through generated `server.yaml` files and `output=` annotations. Both belong to a pipeline deployment, so this package ships neither and depends on no UltraRAG code: memory here is a complete solution for a project and an account, served to agents and people directly, not a stage inside someone else's pipeline |
 | 6 | The reference revision and its captured output are committed and tested | the format cannot drift quietly: a change fails `tests/test_fidelity.py` |
 | 7 | The browser view is the shared `ui-ultra-rag-mcp` package through a thin adapter, pinned by commit | interface code stays in one repository, and this package keeps no second UI |
 | 8 | The page reaches memory only through this server: no directory is handed to the browser | one reader and one writer per file, and the page shows what an agent reads |
@@ -194,18 +221,29 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 12 | A read takes a query and answers it, and no tool returns a memory whole | a memory grows by appending; reading it whole spends the context window on the file instead of on the work, and would be unusable after a few weeks |
 | 13 | The search runs over an FTS5 index built from the memory's own document, kept beside it and disposable | a read is then a lookup and a page of rows rather than a pass over the whole memory, so its cost does not grow with it; the document stays the record, so an index is never the thing that is true |
 | 14 | The index follows the files instead of leading them, and no write path updates it | a memory edited by hand or by a UltraRAG UI is read correctly, because a read compares each file against what was indexed and re-reads only what changed |
-| 15 | A statement is appended to the standing document, and nothing is attributed to a speaker | attributing a statement to the user or to an assistant would put a claim in the file that nobody made |
+| 15 | A statement is inserted at the top of the standing document, and nothing is attributed to a speaker | attributing a statement to the user or to an assistant would put a claim in the file that nobody made. Insertion rather than appending is choice 27 |
 | 16 | Global memory has no `user_id`: it is the account's one memory, in the directory upstream uses for the user it is given when none is named | a project is identified by the repository it is bound to, so a user dimension would be a second identity for something already identified; the directory is left as upstream's so the layout, an existing store, and a UltraRAG UI are unaffected |
 | 17 | A read works in words and in meaning, fused, with the model behind a seam | a memory is largely proper nouns, paths and identifiers, which the collection's own measurements say need words; a query that never used the caller's wording needs meaning |
 | 18 | The model is local, pinned, listed, and run on the CPU in this process | no API is used at this stage, the weights are fetched once into this package's own cache, and a stronger or multilingual model is one line rather than a rewrite |
 | 19 | Recording is asynchronous; a lookup is not | a write may cost an append and a queued unit and never fails because the lookup layer is missing; a read may only do constant work, so it never embeds units, walks the scope, or loads a model |
 | 20 | A read keeps the word index in step with the Markdown, and `memory-ultra-rag-reindex` settles the vectors a hand edit owes | superseded by choice 26, which reverses the reasoning: the sweep this trade was measured against counted a few thousand *dated files*, and a scope here is one document — a read now fingerprints it and re-reads it only when it changed |
-| 21 | A statement is filed under a type the caller names, one run of block letters written as the statement's own first words and a colon, indexed with it and never returned by a read | a memory is a list of unrelated statements, and a category is what makes a query for "which of these are corrections" answerable; the type is the caller's own and carries no meaning, so the server defines no vocabulary and reads the label as opaque text — a single word keeps the document plain prose with no field syntax and keeps the label separable from the statement, and the recorded bytes are the one place this package's standing document differs from upstream's, where a fresh scope still matches upstream byte for byte (`tests/test_fidelity.py`, and the differential test when a checkout is available) |
+| 21 | A statement is filed under a kind the caller names, held as a column of the record and returned as a field of its own rather than as part of the text | a memory is a list of unrelated statements, and a category is what makes a read for one kind answerable; the kind is the caller's own and carries no meaning, so the server defines no vocabulary and stores the word as it was given. A single word keeps it separable from the statement, and the document stays plain prose |
 | 22 | A scope is its standing document, with no dated exchange log beside it | anything worth keeping is recorded as a statement, and a date does not change what a statement is, so the log upstream keeps beside the document would be a second record of the same thing with a shape nothing here can answer a question from — the store, the index and the tools have one kind of unit, and the differential test asserts this side writes no dated file at all |
 | 23 | A lookup drops English stop words before it searches | the word side asks FTS5 for every query term at once, so a term in no statement does not narrow the answer, it empties it, and the fallback then rescues the query by accident: "what is research-rag for" finds nothing, because no statement contains "what" |
 | 24 | Reranking is on by default, at a depth of ten candidates | a memory's units are one line each, which is where a bi-encoder's vector is weakest, and a cross-encoder reads the pair rather than either side alone; measured here at 54 ms for ten candidates, which is what sets the depth against the 250 ms read ceiling. That it is more *accurate* is unmeasured, and nothing in this package claims it |
 | 25 | This memory is English, and the models and the stop words say so | a memory is a record of what one person decided and asked to be kept, in one language; the embedder is `bge-small-en-v1.5` and the reranker is an English cross-encoder, so anything else is outside what the lookup was built to answer |
-| 26 | A read keeps the word index in step with the Markdown, and a hand-written statement with no type is counted | a memory is a file a person is meant to open, so a statement typed, reworded, or deleted by hand has to be answerable without anyone running a reindex, and a deleted statement must stop answering rather than keep serving from a stale index; the check is one fingerprint (measured ~17 µs) and a changed file is re-read whole (~2 ms), against a read of hundreds of milliseconds. It supersedes choice 20, whose measurement counted a directory of dated files that this server no longer has. A read still does not embed a unit and does not walk a scope; the vectors a hand edit owes stay with the write side's worker and are disclosed as `units_pending`, while a statement a person wrote without a type is disclosed as `unlabelled` because it is findable but absent from every question asked by type |
+| 26 | A read brings the document back in line with the record, and a hand edit to it is disclosed | a memory is something a person is meant to open, and a hand edit has to do something definite rather than nothing. With the record in the table, the definite thing is that the edit does not take: the document is written out from the record and the read reports `document_rewritten`. A statement is changed by `forget_memory_*` and `set_memory_*`, or by the page, and each of them changes the record first. This supersedes the earlier version of this row, which made the Markdown the record and kept a read in step with it by fingerprint (~17 µs unchanged, ~2 ms to re-read) — a property worth nothing once the words are not read from it |
+
+| 27 | A new statement is inserted at the top of the standing document, and a read prefers new information by a bounded bonus | upstream appends, so its oldest statement is first, and a memory that only grows ends up answering with what it learned months ago as readily as what it learned an hour ago. Insertion on top makes the file a person opens read in the order things happened, and the bonus — at most ten per cent of the fused score, decaying with distance from the top — settles a tie towards the caller's current state without ever preferring a weaker match. The block format is untouched and a fresh scope is still byte-identical to upstream's (`tests/test_fidelity.py`) |
+| 28 | Forgetting is a tool, and it matches the words exactly | a memory that cannot be emptied accumulates statements that are no longer true, and a later read returns them as confidently as the true ones. The match is on the exact text and never on meaning, and a query that matches several statements removes none of them, so one vague call cannot lose two decisions. The alternative — leaving removal to a person editing the Markdown — is what made the gap hard to notice |
+| 29 | A handoff is one statement under a reserved kind, and setting it removes the previous one | yesterday's handoff and today's are both plausible and neither is current, which is worse than having none: a session cannot tell which one it is reading. Replacing by kind means the caller records a handoff and never thinks about the old one, and `replaced` reports what went so the loss is disclosed rather than silent. The handoff is a project's own state, so it has no global form |
+| 30 | A statement's kind is optional and defaults to `ITEM` | a required kind is a decision every write has to make before it can make the write. A default that is a real kind means every statement is filed under something findable, and `ITEM` is exactly the right name for a statement nobody classified |
+| 31 | When a statement was added, and how often it has been recalled, are a table in the same SQLite file as the word index | a statement that has been recalled fifty times and one that has never been recalled are not equally worth keeping, and neither fact is in the Markdown, whose bytes must stay the record and stay compatible with what upstream and a UltraRAG UI read. Putting the history in the file the read already has open means a recall is one `UPDATE` per statement answered, in the transaction the answer was read in: atomic without a temporary file, no background thread, and proportional to the answer rather than to the memory. The file is therefore no longer purely derived — deleting it costs a re-read *and* the counts, which is stated rather than assumed, and the document itself is never in its power to lose. A separate JSON file was the first shape of this and needed a background writer precisely because it was not in the transaction |
+| 32 | A column that cannot vary is not kept, and the field is called `kind` | a `kind` column held `statement` for every row and said nothing, because a scope is one document of statements. A column that cannot vary is a claim the schema makes and does not keep. The field that does vary is the statement's own kind, and it is the column now (`kind`), indexed with the statement so a read can be narrowed to one |
+
+| 33 | The record is the table, and `MEMORY.md` is an export of it | a memory is meant to be a thing a person owns, and a SQLite file is a thing a person cannot read, diff, commit, or carry. Upstream's whole design is a Markdown file in a project's repository, and a UltraRAG UI reads the global one from the shared storage tree; a record that is not a file breaks both. The table holds every statement, its kind, its position, its date, and its count, and the file is written from it. What is given up is stated rather than implied: a hand edit to the file does not take and is disclosed, a kind is a column and so is asked for rather than searched for, and a file recovered from an export has the words in the right order with every statement undated and filed as `ITEM` |
+| 34 | A statement's kind is a column, not a prefix on its line | `RULE: the draft lives in docs/` is a tagged line, and a file of them reads as data rather than as something a person wrote — which is what a memory is for. The kind is still one run of block letters and still the caller's, and it is still returned with every answer; what changed is that it is held with the statement instead of inside its text, so a read narrows to a category rather than searching for a word that is no longer there. A file written before this is read once on upgrade and its prefixes become kinds |
+| 35 | The export holds the statements and nothing else | A file that carried the kinds, the dates, and the counts would be a second record to keep in step, and keeping two in step is how a memory loses a statement. So the file is a rendering: the words, in order. It is regenerated on every write, so it cannot drift; it is not read, so it cannot be wrong; and a memory lost with its database comes back as what was said rather than as how it was said, which is the honest limit of a file that was never a backup |
 
 ## Develop and test
 
