@@ -137,7 +137,7 @@ def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
         async with Client(app) as client:
             return _data(
                 await client.call_tool(
-                    "set_memory_local", {"content": "a fact", "kind": "note"}
+                    "record_memory", {"content": "a fact", "kind": "note"}
                 )
             )
 
@@ -166,7 +166,7 @@ def test_a_write_touches_only_what_it_wrote(tmp_path: Path) -> None:
     with MemoryIndex(directory) as index:
         assert index.count_units() == 50
 
-    engine.record(directory, "one more statement", "NOTE")
+    engine.record(directory=directory, content="one more statement", kind="NOTE")
 
     with MemoryIndex(directory) as index:
         assert index.count_units() == 51

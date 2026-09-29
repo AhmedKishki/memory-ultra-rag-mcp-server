@@ -20,7 +20,7 @@ from fastmcp.exceptions import ToolError
 
 from memory_ultra_rag_mcp import server
 from memory_ultra_rag_mcp.config import resolve_config
-from memory_ultra_rag_mcp.index import MemoryIndex, index_path
+from memory_ultra_rag_mcp.index import MemoryIndex
 from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
 
 
@@ -62,8 +62,9 @@ def _app(config, embedder: FakeEmbedder | None = None, **policy):
     )
 
 
-def test_the_surface_is_the_seven_memory_tools(tmp_path: Path) -> None:
-    """Four verbs across two scopes, plus this project's handoff, and nothing else."""
+def test_the_surface_is_four_memory_tools(tmp_path: Path) -> None:
+    """Four verbs, named for what they do, with the scope an argument rather
+    than a second tool. An agent chooses a memory and a verb, never a tool."""
 
     app = _app(_config(tmp_path))
 
@@ -72,14 +73,125 @@ def test_the_surface_is_the_seven_memory_tools(tmp_path: Path) -> None:
             return sorted(tool.name for tool in await client.list_tools())
 
     assert asyncio.run(scenario()) == [
-        "forget_memory_global",
-        "forget_memory_local",
-        "get_memory_global",
-        "get_memory_local",
-        "set_memory_global",
-        "set_memory_handoff",
-        "set_memory_local",
+        "forget_memory",
+        "recall_memory",
+        "record_handoff",
+        "record_memory",
     ]
+
+
+def test_recording_takes_a_scope_and_defaults_to_the_project(tmp_path: Path) -> None:
+    """One tool for both memories, and the safe default is the project's."""
+
+    config = _config(tmp_path)
+    app = _app(config, FakeEmbedder())
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            tools = {tool.name: tool for tool in await client.list_tools()}
+            record = tools["record_memory"].inputSchema
+            assert record["properties"]["scope"]["default"] == "local"
+            # And no tool anywhere still asks for a memory by name.
+            for tool in tools.values():
+                assert "local" not in tool.name
+                assert "global" not in tool.name
+            here = _data(
+                await client.call_tool(
+                    "record_memory",
+                    {"content": "a fact about this project"},
+                    raise_on_error=True,
+                )
+            )
+            everywhere = _data(
+                await client.call_tool(
+                    "record_memory",
+                    {"content": "short answers", "scope": "global"},
+                    raise_on_error=True,
+                ),
+            )
+            with pytest.raises(ToolError):
+                await client.call_tool(
+                    "record_memory",
+                    {"content": "a fact", "scope": "everywhere"},
+                    raise_on_error=True,
+                )
+            return {"here": here, "everywhere": everywhere}
+
+    answers = asyncio.run(scenario())
+    assert answers["here"]["scope"] == "local"
+    assert answers["everywhere"]["scope"] == "global"
+    assert "a fact about this project" in (
+        config.local_directory / "MEMORY.md"
+    ).read_text(encoding="utf-8")
+    assert "short answers" in (config.global_directory / "MEMORY.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_a_recall_searches_both_memories_and_ranks_them_together(
+    tmp_path: Path,
+) -> None:
+    """One question is one answer, and each statement says where it came from."""
+
+    config = _config(tmp_path)
+    engine = _engine(config, FakeEmbedder())
+    app = _app(config, FakeEmbedder())
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "record_memory",
+                {"content": "the corpus parser lives in corpus_io.py", "kind": "PLAN"},
+                raise_on_error=True,
+            )
+            await client.call_tool(
+                "record_memory",
+                {
+                    "content": "always ask before editing the corpus parser",
+                    "kind": "RULE",
+                    "scope": "global",
+                },
+                raise_on_error=True,
+            )
+            return _data(
+                await client.call_tool(
+                    "recall_memory", {"query": "corpus parser"}, raise_on_error=True
+                )
+            )
+
+    answer = asyncio.run(scenario())
+    assert {unit["scope"] for unit in answer["units"]} == {"local", "global"}
+    assert answer["scope_counts"] == {"local": 1, "global": 1}
+    assert answer["scopes"] == ["local", "global"]
+    assert engine is not None
+
+
+def test_forgetting_finds_the_statement_in_whichever_memory_holds_it(
+    tmp_path: Path,
+) -> None:
+    """A caller who cannot say which memory meant it should not have to guess."""
+
+    config = _config(tmp_path)
+    app = _app(config, FakeEmbedder())
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "record_memory",
+                {"content": "short answers", "scope": "global"},
+                raise_on_error=True,
+            )
+            return _data(
+                await client.call_tool(
+                    "forget_memory", {"text": "short answers"}, raise_on_error=True
+                )
+            )
+
+    forgotten = asyncio.run(scenario())
+    assert forgotten["scope"] == "global"
+    assert "short answers" not in (config.global_directory / "MEMORY.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
@@ -91,13 +203,13 @@ def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
         async with Client(app) as client:
             return _data(
                 await client.call_tool(
-                    "set_memory_local",
+                    "record_memory",
                     {"content": "The draft lives in docs/", "kind": "note"},
                 )
             )
 
     recorded = asyncio.run(scenario())
-    assert recorded["status"] == "set"
+    assert recorded["status"] == "recorded"
     assert recorded["standing_document"] == str(config.local_directory / "MEMORY.md")
     standing = (config.local_directory / "MEMORY.md").read_text(encoding="utf-8")
     assert "The draft lives in docs/" in standing
@@ -122,13 +234,11 @@ def test_a_statement_is_embedded_off_the_calling_thread(tmp_path: Path) -> None:
         async with Client(app) as client:
             recorded = _data(
                 await client.call_tool(
-                    "set_memory_local", {"content": "a fact", "kind": "note"}
+                    "record_memory", {"content": "a fact", "kind": "note"}
                 )
             )
             drained = engine.worker_for(config.local_directory).drain(5.0)
-            read = _data(
-                await client.call_tool("get_memory_local", {"query": "a fact"})
-            )
+            read = _data(await client.call_tool("recall_memory", {"query": "a fact"}))
             return recorded | {"drained": drained, "read": read}
 
     outcome = asyncio.run(scenario())
@@ -151,7 +261,7 @@ def test_a_write_survives_a_model_that_cannot_be_loaded(tmp_path: Path) -> None:
         async with Client(app) as client:
             recorded = _data(
                 await client.call_tool(
-                    "set_memory_local", {"content": "a fact", "kind": "note"}
+                    "record_memory", {"content": "a fact", "kind": "note"}
                 )
             )
             drained = _engine(config, embedder)
@@ -160,7 +270,7 @@ def test_a_write_survives_a_model_that_cannot_be_loaded(tmp_path: Path) -> None:
             }
 
     outcome = asyncio.run(scenario())
-    assert outcome["status"] == "set"
+    assert outcome["status"] == "recorded"
     assert "a fact" in (config.local_directory / "MEMORY.md").read_text(
         encoding="utf-8"
     )
@@ -175,11 +285,15 @@ def test_a_global_statement_is_written_under_the_storage_root(tmp_path: Path) ->
         async with Client(app) as client:
             recorded = _data(
                 await client.call_tool(
-                    "set_memory_global",
-                    {"content": "always cite the commit", "kind": "rule"},
+                    "record_memory",
+                    {
+                        "content": "always cite the commit",
+                        "kind": "rule",
+                        "scope": "global",
+                    },
                 )
             )
-            read = _data(await client.call_tool("get_memory_global", {"query": "cite"}))
+            read = _data(await client.call_tool("recall_memory", {"query": "cite"}))
             return recorded | {"read": read}
 
     outcome = asyncio.run(scenario())
@@ -198,16 +312,16 @@ def test_a_read_answers_a_question_not_a_file(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "morning coffee is not in this project", "kind": "NOTE"},
                 raise_on_error=True,
             )
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the draft lives in drafts/", "kind": "PLAN"},
                 raise_on_error=True,
             )
-            return _data(await client.call_tool("get_memory_local", {"query": "draft"}))
+            return _data(await client.call_tool("recall_memory", {"query": "draft"}))
 
     read = asyncio.run(scenario())
     answer = json.dumps(read)
@@ -232,12 +346,12 @@ def test_a_read_finds_a_statement_by_meaning_alone(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the third draft lives in drafts/", "kind": "note"},
             )
             engine.worker_for(config.local_directory).drain(5.0)
             return _data(
-                await client.call_tool("get_memory_local", {"query": "manuscript"})
+                await client.call_tool("recall_memory", {"query": "manuscript"})
             )
 
     read = asyncio.run(scenario())
@@ -258,11 +372,11 @@ def test_a_read_that_needs_no_meaning_says_which_side_answered(tmp_path: Path) -
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "always cite the commit", "kind": "rule"},
             )
             engine.worker_for(config.local_directory).drain(5.0)
-            return _data(await client.call_tool("get_memory_local", {"query": "cite"}))
+            return _data(await client.call_tool("recall_memory", {"query": "cite"}))
 
     read = asyncio.run(scenario())
     assert read["matched_by"] in {"lexical", "both"}
@@ -280,11 +394,11 @@ def test_a_read_says_so_when_the_model_is_not_resident(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local", {"content": "a fact", "kind": "note"}
+                "record_memory", {"content": "a fact", "kind": "note"}
             )
             engine.worker_for(config.local_directory).drain(5.0)
             embedder._loaded = False
-            return _data(await client.call_tool("get_memory_local", {"query": "fact"}))
+            return _data(await client.call_tool("recall_memory", {"query": "fact"}))
 
     read = asyncio.run(scenario())
     assert read["semantic_available"] is False
@@ -302,15 +416,15 @@ def test_a_read_is_capped_and_says_so(tmp_path: Path) -> None:
         async with Client(app) as client:
             for index in range(5):
                 await client.call_tool(
-                    "set_memory_local",
+                    "record_memory",
                     {"content": f"draft note {index} noted", "kind": "NOTE"},
                 )
             engine.worker_for(config.local_directory).drain(5.0)
             return (
-                _data(await client.call_tool("get_memory_local", {"query": "draft"})),
+                _data(await client.call_tool("recall_memory", {"query": "draft"})),
                 _data(
                     await client.call_tool(
-                        "get_memory_local", {"query": "draft", "limit": 2}
+                        "recall_memory", {"query": "draft", "limit": 2}
                     )
                 ),
             )
@@ -329,7 +443,7 @@ def test_a_read_without_a_query_is_refused(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         async with Client(app) as client:
-            await client.call_tool("get_memory_local", {"query": "  "})
+            await client.call_tool("recall_memory", {"query": "  "})
 
     with pytest.raises(ToolError, match="query must not be empty"):
         asyncio.run(scenario())
@@ -349,7 +463,7 @@ def test_a_hand_written_statement_is_not_part_of_the_memory(tmp_path: Path) -> N
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "a recorded fact", "kind": "NOTE"},
                 raise_on_error=True,
             )
@@ -360,7 +474,7 @@ def test_a_hand_written_statement_is_not_part_of_the_memory(tmp_path: Path) -> N
                 encoding="utf-8",
             )
             return _data(
-                await client.call_tool("get_memory_local", {"query": "hand-written"})
+                await client.call_tool("recall_memory", {"query": "hand-written"})
             )
 
     answered = asyncio.run(scenario())
@@ -392,7 +506,7 @@ def test_a_statement_adopted_from_an_export_is_counted_as_untyped(
         async with Client(app) as client:
             return _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "untyped"}, raise_on_error=True
+                    "recall_memory", {"query": "untyped"}, raise_on_error=True
                 )
             )
 
@@ -406,7 +520,7 @@ def test_a_read_keeps_serving_a_statement_deleted_from_the_export(
 ) -> None:
     """Deleting a line from the export does not forget anything.
 
-    A statement is forgotten by `forget_memory_local` or by nobody: the export is
+    A statement is forgotten by `forrecall_memory` or by nobody: the export is
     written from the record, so an edit to it is overwritten with the record and
     disclosed. A read that quietly served less because a line was cut from a file
     would be a read whose answer depends on a file it does not read.
@@ -418,7 +532,7 @@ def test_a_read_keeps_serving_a_statement_deleted_from_the_export(
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "a doomed fact", "kind": "NOTE"},
                 raise_on_error=True,
             )
@@ -429,7 +543,7 @@ def test_a_read_keeps_serving_a_statement_deleted_from_the_export(
             )
             return _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "doomed"}, raise_on_error=True
+                    "recall_memory", {"query": "doomed"}, raise_on_error=True
                 )
             )
 
@@ -449,44 +563,62 @@ def test_an_unchanged_read_does_not_write_the_document_again(
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "a fact", "kind": "NOTE"},
                 raise_on_error=True,
             )
-            first = _data(await client.call_tool("get_memory_local", {"query": "fact"}))
-            second = _data(
-                await client.call_tool("get_memory_local", {"query": "fact"})
-            )
+            first = _data(await client.call_tool("recall_memory", {"query": "fact"}))
+            second = _data(await client.call_tool("recall_memory", {"query": "fact"}))
             return {"first": first, "second": second}
 
     answered = asyncio.run(scenario())
-    assert answered["first"]["document_rewritten"] is False
+    # A read brings both documents in line, and the account's is written out the
+    # first time. The second read finds nothing to do and says so.
+    assert answered["first"]["document_rewritten"] is True
     assert answered["second"]["document_rewritten"] is False
 
 
-def test_the_two_kinds_do_not_share_a_directory(tmp_path: Path) -> None:
+def test_the_two_memories_do_not_share_a_directory(tmp_path: Path) -> None:
+    """One statement, one memory, and the answer says which it went to."""
+
     config = _config(tmp_path)
-    embedder = FakeEmbedder()
-    engine = _engine(config, embedder)
-    app = server.create_server(config, retrieval=engine, warm=False)
+    app = _app(config, FakeEmbedder())
 
     async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
         async with Client(app) as client:
-            local = _data(await client.call_tool("get_memory_local", {"query": "x"}))
-            default_user = _data(
-                await client.call_tool("get_memory_global", {"query": "x"})
+            here = _data(
+                await client.call_tool(
+                    "record_memory",
+                    {"content": "a project fact", "kind": "PLAN"},
+                    raise_on_error=True,
+                )
             )
-            return local, default_user
+            everywhere = _data(
+                await client.call_tool(
+                    "record_memory",
+                    {
+                        "content": "short answers",
+                        "kind": "PREFERENCE",
+                        "scope": "global",
+                    },
+                    raise_on_error=True,
+                )
+            )
+            return here, everywhere
 
-    local, default_user = asyncio.run(scenario())
-    assert local["scope"] == "local"
-    assert default_user["scope"] == "global"
-    assert (config.local_directory / "MEMORY.md").is_file()
-    assert (config.global_directory / "MEMORY.md").is_file()
-    # Two scopes, one file each, neither able to answer for the other.
-    assert index_path(config.local_directory).parent == config.local_directory
-    assert index_path(config.global_directory).parent == config.global_directory
-    assert index_path(config.local_directory) != index_path(config.global_directory)
+    here, everywhere = asyncio.run(scenario())
+    assert (here["scope"], everywhere["scope"]) == ("local", "global")
+    assert config.local_directory != config.global_directory
+    assert (
+        (config.local_directory / "MEMORY.md")
+        .read_text(encoding="utf-8")
+        .endswith("a project fact\n")
+    )
+    assert (
+        (config.global_directory / "MEMORY.md")
+        .read_text(encoding="utf-8")
+        .endswith("short answers\n")
+    )
 
 
 def test_a_project_read_cannot_see_another_projects_memory(tmp_path: Path) -> None:
@@ -505,14 +637,12 @@ def test_a_project_read_cannot_see_another_projects_memory(tmp_path: Path) -> No
         embedder = FakeEmbedder()
         async with Client(_app(first, embedder)) as client:
             await client.call_tool(
-                "set_memory_local", {"content": "first only", "kind": "note"}
+                "record_memory", {"content": "first only", "kind": "note"}
             )
             _engine(first, embedder).worker_for(first.local_directory).drain(5.0)
         async with Client(_app(second, embedder)) as client:
-            read = _data(await client.call_tool("get_memory_local", {"query": "first"}))
-            missing = _data(
-                await client.call_tool("get_memory_local", {"query": "only"})
-            )
+            read = _data(await client.call_tool("recall_memory", {"query": "first"}))
+            missing = _data(await client.call_tool("recall_memory", {"query": "only"}))
         return read, missing
 
     read, missing = asyncio.run(scenario())
@@ -520,24 +650,27 @@ def test_a_project_read_cannot_see_another_projects_memory(tmp_path: Path) -> No
     assert missing["units"] == []
 
 
-def test_the_global_tools_take_no_user(tmp_path: Path) -> None:
-    """One global memory, so there is nothing to name."""
+def test_no_tool_takes_a_user_or_a_project(tmp_path: Path) -> None:
+    """One project and one account, so nothing has to be named to reach either."""
 
     app = _app(_config(tmp_path), FakeEmbedder())
 
-    async def scenario() -> list[set[str]]:
+    async def scenario() -> dict[str, set[str]]:
         async with Client(app) as client:
             tools = {tool.name: tool for tool in await client.list_tools()}
-            return [
-                set(tools["get_memory_global"].inputSchema["properties"]),
-                set(tools["set_memory_global"].inputSchema["properties"]),
-            ]
+            return {
+                name: set(tool.inputSchema["properties"])
+                for name, tool in tools.items()
+            }
 
-    get_parameters, set_parameters = asyncio.run(scenario())
-    assert get_parameters == {"query", "limit", "kind"}
-    # The setters take the statement's category; the readers take no type, because
-    # a read answers with the statement rather than with the label it was filed under.
-    assert set_parameters == {"content", "kind"}
+    properties = asyncio.run(scenario())
+    assert properties["record_memory"] == {"content", "kind", "scope"}
+    assert properties["recall_memory"] == {"query", "kind", "limit"}
+    assert properties["forget_memory"] == {"text", "scope"}
+    assert properties["record_handoff"] == {"content"}
+    for name, keys in properties.items():
+        assert "user" not in keys, name
+        assert "project" not in keys, name
 
 
 def test_a_kind_defaults_to_item_and_a_bad_one_is_refused(tmp_path: Path) -> None:
@@ -549,18 +682,18 @@ def test_a_kind_defaults_to_item_and_a_bad_one_is_refused(tmp_path: Path) -> Non
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             tools = {tool.name: tool for tool in await client.list_tools()}
-            for name in ("set_memory_local", "set_memory_global"):
+            for name in ("record_memory", "record_memory"):
                 schema = tools[name].inputSchema
                 assert "kind" not in set(schema.get("required", []))
                 assert schema["properties"]["kind"]["default"] == "ITEM"
             recorded = _data(
                 await client.call_tool(
-                    "set_memory_local", {"content": "a fact"}, raise_on_error=True
+                    "record_memory", {"content": "a fact"}, raise_on_error=True
                 )
             )
             with pytest.raises(ToolError):
                 await client.call_tool(
-                    "set_memory_local",
+                    "record_memory",
                     {"content": "a fact", "kind": "two words"},
                     raise_on_error=True,
                 )
@@ -589,26 +722,26 @@ def test_a_read_returns_the_kind_and_not_the_kind_in_the_text(
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the draft lives in drafts/", "kind": "CONVENTION"},
                 raise_on_error=True,
             )
             return {
                 "by_statement": _data(
                     await client.call_tool(
-                        "get_memory_local", {"query": "draft"}, raise_on_error=True
+                        "recall_memory", {"query": "draft"}, raise_on_error=True
                     )
                 ),
                 "by_type": _data(
                     await client.call_tool(
-                        "get_memory_local",
+                        "recall_memory",
                         {"query": "draft", "kind": "CONVENTION"},
                         raise_on_error=True,
                     )
                 ),
                 "by_another_type": _data(
                     await client.call_tool(
-                        "get_memory_local",
+                        "recall_memory",
                         {"query": "draft", "kind": "PLAN"},
                         raise_on_error=True,
                     )
@@ -631,9 +764,7 @@ def test_an_empty_statement_is_refused(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         async with Client(app) as client:
-            await client.call_tool(
-                "set_memory_local", {"content": "   ", "kind": "note"}
-            )
+            await client.call_tool("record_memory", {"content": "   ", "kind": "note"})
 
     with pytest.raises(ToolError, match="content must not be empty"):
         asyncio.run(scenario())
@@ -652,11 +783,11 @@ def test_a_reranker_orders_the_answer_when_it_is_switched_on(tmp_path: Path) -> 
         async with Client(app) as client:
             for line in ("the draft is a plan", "the draft lives in docs"):
                 await client.call_tool(
-                    "set_memory_local", {"content": line, "kind": "NOTE"}
+                    "record_memory", {"content": line, "kind": "NOTE"}
                 )
             engine.worker_for(config.local_directory).drain(5.0)
             return _data(
-                await client.call_tool("get_memory_local", {"query": "the draft docs"})
+                await client.call_tool("recall_memory", {"query": "the draft docs"})
             )
 
     read = asyncio.run(scenario())
@@ -695,12 +826,13 @@ def test_a_failing_model_is_reported_and_the_write_still_lands(tmp_path: Path) -
         async with Client(app) as client:
             return _data(
                 await client.call_tool(
-                    "set_memory_global", {"content": "a rule", "kind": "rule"}
+                    "record_memory",
+                    {"content": "a rule", "kind": "rule", "scope": "global"},
                 )
             )
 
     recorded = asyncio.run(scenario())
-    assert recorded["status"] == "set"
+    assert recorded["status"] == "recorded"
     assert recorded["embedded"] is False
     assert "a rule" in (config.global_directory / "MEMORY.md").read_text(
         encoding="utf-8"
@@ -717,14 +849,14 @@ def test_a_handoff_replaces_the_previous_one(tmp_path: Path) -> None:
         async with Client(app) as client:
             first = _data(
                 await client.call_tool(
-                    "set_memory_handoff",
+                    "record_handoff",
                     {"content": "session one: the corpus is a stub"},
                     raise_on_error=True,
                 )
             )
             second = _data(
                 await client.call_tool(
-                    "set_memory_handoff",
+                    "record_handoff",
                     {"content": "session two: the corpus parses now"},
                     raise_on_error=True,
                 )
@@ -755,18 +887,18 @@ def test_a_handoff_is_the_newest_statement_and_is_recallable(
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the corpus parser lives in corpus_io.py", "kind": "PLAN"},
                 raise_on_error=True,
             )
             await client.call_tool(
-                "set_memory_handoff",
+                "record_handoff",
                 {"content": "the corpus parser lives in corpus_io.py and works"},
                 raise_on_error=True,
             )
             return _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "corpus parser"}, raise_on_error=True
+                    "recall_memory", {"query": "corpus parser"}, raise_on_error=True
                 )
             )
 
@@ -785,18 +917,18 @@ def test_forgetting_removes_exactly_the_statement_named(tmp_path: Path) -> None:
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the draft lives in docs/", "kind": "NOTE"},
                 raise_on_error=True,
             )
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "always cite the commit", "kind": "RULE"},
                 raise_on_error=True,
             )
             return _data(
                 await client.call_tool(
-                    "forget_memory_local",
+                    "forget_memory",
                     {"text": "the draft lives in docs/"},
                     raise_on_error=True,
                 )
@@ -824,25 +956,26 @@ def test_forgetting_needs_the_exact_text(tmp_path: Path) -> None:
     async def scenario() -> tuple[list[str], list[str]]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the draft lives in docs/", "kind": "NOTE"},
                 raise_on_error=True,
             )
             tools = {tool.name: tool for tool in await client.list_tools()}
             # The parameter is named for what it is: the text, not a search.
-            assert set(tools["forget_memory_local"].inputSchema["properties"]) == {
-                "text"
+            assert set(tools["forget_memory"].inputSchema["properties"]) == {
+                "text",
+                "scope",
             }
             messages = []
             for text in ("draft", "the draft lives in docs", ""):
                 with pytest.raises(ToolError) as raised:
                     await client.call_tool(
-                        "forget_memory_local", {"text": text}, raise_on_error=True
+                        "forget_memory", {"text": text}, raise_on_error=True
                     )
                 messages.append(str(raised.value))
             read = _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "draft"}, raise_on_error=True
+                    "recall_memory", {"query": "draft"}, raise_on_error=True
                 )
             )
             return messages, [unit["text"] for unit in read["units"]]
@@ -865,13 +998,13 @@ def test_forgetting_refuses_when_the_text_is_ambiguous(tmp_path: Path) -> None:
         async with Client(app) as client:
             for kind in ("PLAN", "NOTE"):
                 await client.call_tool(
-                    "set_memory_local",
+                    "record_memory",
                     {"content": "the draft lives in docs/", "kind": kind},
                     raise_on_error=True,
                 )
             with pytest.raises(ToolError) as raised:
                 await client.call_tool(
-                    "forget_memory_local",
+                    "forget_memory",
                     {"text": "the draft lives in docs/"},
                     raise_on_error=True,
                 )
@@ -879,8 +1012,8 @@ def test_forgetting_refuses_when_the_text_is_ambiguous(tmp_path: Path) -> None:
 
     message = asyncio.run(scenario())
     assert "2 statements match that text exactly" in message
-    assert "[PLAN]" in message
-    assert "[NOTE]" in message
+    assert "[local PLAN]" in message
+    assert "[local NOTE]" in message
 
 
 def test_a_read_reports_when_a_statement_was_added_and_how_often_it_was_recalled(
@@ -894,18 +1027,18 @@ def test_a_read_reports_when_a_statement_was_added_and_how_often_it_was_recalled
     async def scenario() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the draft lives in docs/", "kind": "NOTE"},
                 raise_on_error=True,
             )
             first = _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "draft"}, raise_on_error=True
+                    "recall_memory", {"query": "draft"}, raise_on_error=True
                 )
             )
             second = _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "draft"}, raise_on_error=True
+                    "recall_memory", {"query": "draft"}, raise_on_error=True
                 )
             )
             return first["units"], second["units"]
@@ -931,7 +1064,7 @@ def test_the_newest_statement_is_answered_before_an_older_equal_one(
         async with Client(app) as client:
             for index in range(6):
                 await client.call_tool(
-                    "set_memory_local",
+                    "record_memory",
                     {
                         "content": f"the corpus parser note {index} lives here",
                         "kind": "NOTE",
@@ -940,7 +1073,7 @@ def test_the_newest_statement_is_answered_before_an_older_equal_one(
                 )
             return _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "corpus parser"}, raise_on_error=True
+                    "recall_memory", {"query": "corpus parser"}, raise_on_error=True
                 )
             )["units"]
 
@@ -983,7 +1116,7 @@ def test_recency_prefers_the_newest_and_keeps_a_better_match_first(
         async with Client(app) as client:
             # The one statement that holds the path the query names.
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {
                     "content": "the corpus parser note lives in corpus_io.py",
                     "kind": "NOTE",
@@ -992,7 +1125,7 @@ def test_recency_prefers_the_newest_and_keeps_a_better_match_first(
             )
             for index in range(20):
                 await client.call_tool(
-                    "set_memory_local",
+                    "record_memory",
                     {
                         "content": f"the corpus parser note {index} lives in a.py",
                         "kind": "NOTE",
@@ -1001,7 +1134,7 @@ def test_recency_prefers_the_newest_and_keeps_a_better_match_first(
                 )
             return _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "corpus_io.py"}, raise_on_error=True
+                    "recall_memory", {"query": "corpus_io.py"}, raise_on_error=True
                 )
             )["units"]
 
@@ -1021,7 +1154,7 @@ def test_a_zero_recency_bonus_answers_on_the_match_alone(tmp_path: Path) -> None
         async with Client(app) as client:
             for index in range(6):
                 await client.call_tool(
-                    "set_memory_local",
+                    "record_memory",
                     {
                         "content": f"the corpus parser note {index} lives in a.py",
                         "kind": "NOTE",
@@ -1030,7 +1163,7 @@ def test_a_zero_recency_bonus_answers_on_the_match_alone(tmp_path: Path) -> None
                 )
             return _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "corpus parser"}, raise_on_error=True
+                    "recall_memory", {"query": "corpus parser"}, raise_on_error=True
                 )
             )["units"]
 
@@ -1052,12 +1185,12 @@ def test_the_preference_is_among_the_statements_that_matched(tmp_path: Path) -> 
     async def scenario() -> list[dict[str, Any]]:
         async with Client(app) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the gitlab runner uses a 4 GiB runner", "kind": "NOTE"},
                 raise_on_error=True,
             )
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {
                     "content": "always cite the commit that introduced a change",
                     "kind": "RULE",
@@ -1066,7 +1199,7 @@ def test_the_preference_is_among_the_statements_that_matched(tmp_path: Path) -> 
             )
             return _data(
                 await client.call_tool(
-                    "get_memory_local", {"query": "gitlab runner"}, raise_on_error=True
+                    "recall_memory", {"query": "gitlab runner"}, raise_on_error=True
                 )
             )["units"]
 
@@ -1075,3 +1208,37 @@ def test_the_preference_is_among_the_statements_that_matched(tmp_path: Path) -> 
     # query, so it is not the answer: the preference is among statements that did.
     assert units[0]["text"] == "the gitlab runner uses a 4 GiB runner"
     assert "always cite the commit" not in [unit["text"] for unit in units]
+
+
+def test_the_scope_argument_names_the_two_destinations_and_no_rule_for_choosing(
+    tmp_path: Path,
+) -> None:
+    """The server says where a statement can go, and leaves the judgement semantic.
+
+    A set of phrases that make a statement global would be worse than nothing: an
+    agent that waits for a marker files a user-wide rule in the project, and the
+    rule is then invisible everywhere else.
+    """
+
+    from memory_ultra_rag_mcp.instructions import SERVER_INSTRUCTIONS
+
+    app = _app(_config(tmp_path), FakeEmbedder())
+
+    async def scenario() -> str:
+        async with Client(app) as client:
+            tools = {tool.name: tool for tool in await client.list_tools()}
+            return tools["record_memory"].inputSchema["properties"]["scope"][
+                "description"
+            ]
+
+    described = asyncio.run(scenario())
+    assert "this project" in described
+    assert "across projects" in described
+    # The choice is described as read off the substance, and the absence of a
+    # marker is explicitly not a reason to file local.
+    assert "wording" in described or "substance" in described
+    for marker in ('"always"', '"never"', '"from now on"', "in every project"):
+        assert marker not in described
+        assert marker not in SERVER_INSTRUCTIONS
+    assert "most prompts carry no marker" in described
+    assert "prompts carry no marker of their own" in SERVER_INSTRUCTIONS

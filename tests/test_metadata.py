@@ -44,7 +44,9 @@ def test_the_history_is_columns_of_the_record(tmp_path: Path) -> None:
 
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         key = unit_key("NOTE: the draft lives in docs/")
         engine.answer(scope="local", directory=tmp_path, query="draft", limit=5)
     finally:
@@ -67,7 +69,9 @@ def test_the_history_is_columns_of_the_record(tmp_path: Path) -> None:
 def test_a_new_statement_is_dated_when_it_is_recorded(tmp_path: Path) -> None:
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         with MemoryIndex(tmp_path) as index:
             record = index.history([unit_key("NOTE: the draft lives in docs/")])[
                 unit_key("NOTE: the draft lives in docs/")
@@ -85,11 +89,15 @@ def test_recording_the_same_words_twice_keeps_the_first_date(tmp_path: Path) -> 
 
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         key = unit_key("NOTE: the draft lives in docs/")
         with MemoryIndex(tmp_path) as index:
             first = index.history([key])[key]["added_at"]
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         with MemoryIndex(tmp_path) as index:
             second = index.history([key])[key]["added_at"]
     finally:
@@ -101,7 +109,9 @@ def test_recording_the_same_words_twice_keeps_the_first_date(tmp_path: Path) -> 
 def test_a_recall_is_counted_as_it_is_handed_over(tmp_path: Path) -> None:
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         key = unit_key("NOTE: the draft lives in docs/")
         for _ in range(3):
             engine.answer(scope="local", directory=tmp_path, query="draft", limit=5)
@@ -122,7 +132,11 @@ def test_counting_a_recall_touches_only_the_statements_answered(tmp_path: Path) 
     engine = _engine()
     try:
         for number in range(40):
-            engine.record(tmp_path, f"a note {number} about the draft", "NOTE")
+            engine.record(
+                directory=tmp_path,
+                content=f"a note {number} about the draft",
+                kind="NOTE",
+            )
         asked = unit_key("NOTE: a note 39 about the draft")
         untouched = unit_key("NOTE: a note 0 about the draft")
         engine.answer(scope="local", directory=tmp_path, query="note 39 draft", limit=1)
@@ -143,12 +157,16 @@ def test_counting_a_recall_touches_only_the_statements_answered(tmp_path: Path) 
 def test_forgetting_drops_a_statements_own_history(tmp_path: Path) -> None:
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
-        engine.record(tmp_path, "always cite the commit", "RULE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
+        engine.record(directory=tmp_path, content="always cite the commit", kind="RULE")
         kept = unit_key("RULE: always cite the commit")
         engine.answer(scope="local", directory=tmp_path, query="draft", limit=5)
 
-        forgotten = engine.forget(tmp_path, "the draft lives in docs/")
+        forgotten = engine.forget(
+            text="the draft lives in docs/", directories={"local": tmp_path}
+        )
 
         assert forgotten["recalls_removed"] >= 0
         assert _recalls(tmp_path, kept) == 0
@@ -164,7 +182,9 @@ def test_a_reindex_keeps_the_history_while_it_reembeds(tmp_path: Path) -> None:
     engine = _engine()
     embedder = engine.embedder
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         key = unit_key("NOTE: the draft lives in docs/")
         engine.answer(scope="local", directory=tmp_path, query="draft", limit=5)
 
@@ -187,7 +207,9 @@ def test_a_record_is_not_lost_to_a_schema_change(tmp_path: Path) -> None:
 
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         engine.answer(scope="local", directory=tmp_path, query="draft", limit=5)
     finally:
         engine.close()
@@ -254,7 +276,9 @@ def test_a_hand_edited_document_is_overwritten_and_disclosed(tmp_path: Path) -> 
 
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         (tmp_path / "MEMORY.md").write_text(
             "# MEMORY\nsomething a person typed by hand\n", encoding="utf-8"
         )
@@ -276,7 +300,9 @@ def test_a_hand_edited_document_is_overwritten_and_disclosed(tmp_path: Path) -> 
 def test_a_document_that_already_matches_is_left_alone(tmp_path: Path) -> None:
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         first = engine.answer(scope="local", directory=tmp_path, query="draft", limit=5)
         second = engine.answer(
             scope="local", directory=tmp_path, query="draft", limit=5
@@ -321,7 +347,9 @@ def test_one_file_holds_the_record_the_vectors_and_nothing_else(
 
     engine = _engine()
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         engine.answer(scope="local", directory=tmp_path, query="draft", limit=5)
         engine.worker_for(tmp_path).drain(5.0)
         reindex([tmp_path], engine.embedder)
@@ -355,7 +383,9 @@ def test_an_old_vector_file_is_copied_in_rather_than_re_embedded(
     embedder = engine.embedder
     identity = embedder.identity
     try:
-        engine.record(tmp_path, "the draft lives in docs/", "NOTE")
+        engine.record(
+            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
+        )
         engine.worker_for(tmp_path).drain(5.0)
         # Move the vectors into a file of the shape version 5 wrote.
         with MemoryIndex(tmp_path) as index:
@@ -445,8 +475,12 @@ def test_a_worker_writes_only_the_scope_it_was_built_for(tmp_path: Path) -> None
     )
     worker = EmbeddingWorker(embedder, first)
     try:
-        engine.record(first, "the first scope's statement", "NOTE")
-        engine.record(second, "the second scope's statement", "NOTE")
+        engine.record(
+            directory=first, content="the first scope's statement", kind="NOTE"
+        )
+        engine.record(
+            directory=second, content="the second scope's statement", kind="NOTE"
+        )
 
         reindex([first, second], embedder, worker=worker)
 
@@ -470,8 +504,8 @@ def test_a_renamed_column_keeps_the_kinds_the_file_held(tmp_path: Path) -> None:
 
     engine = _engine()
     try:
-        engine.record(tmp_path, "the oldest note", "TEST")
-        engine.record(tmp_path, "the newest plan", "PLAN")
+        engine.record(directory=tmp_path, content="the oldest note", kind="TEST")
+        engine.record(directory=tmp_path, content="the newest plan", kind="PLAN")
         engine.answer(scope="local", directory=tmp_path, query="plan", limit=5)
 
         # A file of the previous version: the field is called `type`.

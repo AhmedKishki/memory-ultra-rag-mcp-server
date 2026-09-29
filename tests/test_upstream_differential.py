@@ -165,16 +165,16 @@ async def _exercise_ours(
     async with Client(transport, init_timeout=120) as client:
         tools = sorted(tool.name for tool in await client.list_tools())
         await client.call_tool(
-            "set_memory_global",
+            "record_memory",
             {"content": STATEMENT, "kind": STATEMENT_KIND},
             raise_on_error=True,
         )
         await client.call_tool(
-            "get_memory_global", {"query": STATEMENT}, raise_on_error=True
+            "recall_memory", {"query": STATEMENT}, raise_on_error=True
         )
     async with Client(transport, init_timeout=120) as client:
-        read = _data(await client.call_tool("get_memory_global", {"query": STATEMENT}))
-        fresh = _data(await client.call_tool("get_memory_global", {"query": "MEMORY"}))
+        read = _data(await client.call_tool("recall_memory", {"query": STATEMENT}))
+        fresh = _data(await client.call_tool("recall_memory", {"query": "MEMORY"}))
     return tools, read, fresh
 
 
@@ -279,13 +279,14 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     assert "build" in upstream_tools  # UltraRAG's pipeline tool, which we exclude
     assert "build" not in our_tools
     assert set(our_tools) == {
-        "get_memory_global",
-        "get_memory_local",
-        "set_memory_global",
-        "set_memory_local",
+        "recall_memory",
+        "record_memory",
+        "record_handoff",
+        "forget_memory",
     }
-    # The two upstream memory tools are renamed, not re-exposed: an agent sees one
-    # verb per scope, and the scope is in the name (ADR 0001).
+    # The two upstream memory tools are renamed and halved, not re-exposed: an
+    # agent sees one verb per operation and chooses the memory with an argument
+    # (ADR 0001).
     assert "get_global_memory" not in our_tools
     assert "save_memory" not in our_tools
     assert {"get_global_memory", "save_memory"} <= set(upstream_tools)
@@ -304,12 +305,12 @@ def test_the_bytes_match_a_real_ultrarag_checkout(tmp_path: Path) -> None:
     our_parameters = {
         name: set(schemas)
         for name, schemas in (
-            ("get_memory_global", {"query", "limit"}),
-            ("set_memory_global", {"content", "kind"}),
+            ("recall_memory", {"query", "limit"}),
+            ("record_memory", {"content", "kind"}),
         )
     }
-    assert "user_id" not in our_parameters["get_memory_global"]
-    assert "user_id" not in our_parameters["set_memory_global"]
+    assert "user_id" not in our_parameters["recall_memory"]
+    assert "user_id" not in our_parameters["record_memory"]
     assert (
         asyncio.run(
             _upstream_refuses_a_bad_user(

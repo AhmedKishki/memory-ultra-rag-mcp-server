@@ -479,6 +479,30 @@ class MemoryIndex:
         connection.commit()
         return key, replaced
 
+    def matches(self, text: str) -> list[Statement]:
+        """Return the statements whose text is exactly this, and remove none.
+
+        The question and the removal are separate, because a caller searching two
+        memories has to see every match before it removes any of them: the whole
+        point of an exact match is that nobody loses two statements to one vague
+        question.
+        """
+
+        wanted = normalise(text)
+        return [
+            statement
+            for statement in self.statements()
+            if statement.normalized == wanted
+        ]
+
+    def drop(self, key: str) -> int:
+        """Remove one statement by its identity, and return whether it went."""
+
+        connection = self._open()
+        cursor = connection.execute("DELETE FROM unit WHERE unit_key = ?", (key,))
+        connection.commit()
+        return int(cursor.rowcount or 0)
+
     def forget(self, normalized: str) -> list[Statement]:
         """Remove the statements whose text is exactly this, and return them.
 
@@ -492,11 +516,8 @@ class MemoryIndex:
             for statement in self.statements()
             if statement.normalized == normalized
         ]
-        if not found or len(found) > 1:
-            return found
-        connection = self._open()
-        connection.execute("DELETE FROM unit WHERE unit_key = ?", (found[0].key,))
-        connection.commit()
+        if len(found) == 1:
+            self.drop(found[0].key)
         return found
 
     def replace_all(self, statements: list[Statement]) -> dict[str, int]:

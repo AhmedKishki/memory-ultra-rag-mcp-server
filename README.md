@@ -63,58 +63,40 @@ The first root is inside the project and the second is in the account's home, an
 
 One server instance serves one project, so `--project-root` binds the session: local memory always means that project's memory.
 
-## The seven tools
+## The four tools
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `get_memory_local` | `query`, `limit=10`, `kind` | Returns the statements in this project's memory that match `query`, optionally only those filed under `kind`. |
-| `get_memory_global` | `query`, `limit=10`, `kind` | Returns the statements in the account's memory that match `query`, optionally only those filed under `kind`. |
-| `set_memory_local` | `content`, `kind=ITEM` | Records one statement at the top of this project's memory. |
-| `set_memory_global` | `content`, `kind=ITEM` | Records one statement at the top of the account's memory. |
-| `forget_memory_local` | `query` | Removes the one statement this project's memory holds whose text is exactly `query`. |
-| `forget_memory_global` | `query` | Removes the one statement the account's memory holds whose text is exactly `query`. |
-| `set_memory_handoff` | `content` | Records this session's handoff for the next one, and removes the previous handoff. |
+| `record_memory` | `content`, `kind=ITEM`, `scope=local` | Records one statement in the project's or the account's memory. |
+| `recall_memory` | `query`, `kind`, `limit=10` | Returns the statements from both memories that match `query`, ranked together. |
+| `forget_memory` | `text`, `scope` | Removes the one statement whose text is exactly `text`. |
+| `record_handoff` | `content` | Records this session's handoff for the next, replacing the previous one. |
 
-Four verbs, and the scope in the name where there is one to name, so the only decision an agent makes is whether a memory is this project's or the account's. There is no `user_id`: **one server is bound to one project**, and that project reaches exactly two memories — its own, inside its repository, and the one global memory, which belongs to the account and is shared by every project on the same storage root. A handoff is only this project's, because a handoff is about a session of working in this project.
+Four verbs, named for what they do. **The scope is an argument, not a second
+tool**: an agent chooses an operation and a memory, and never picks between two
+tools that differ only by a word in their name. `scope` is `"local"` — this
+project, inside the repository — or `"global"` — across projects, in the
+account's memory — and it defaults to `"local"`.
 
-**A kind is asked for, not searched for.** It is a column of the record, not a word in the statement, so `kind` on a read narrows the answer to one category and a query that merely names a category finds nothing. That is the honest answer: the words are not in the text.
+Which one a statement belongs in is read off what the user is asking for and how
+far they mean it to reach. A fact about this repository is local whatever it is
+called; a preference about how they want to be spoken to, or a rule about their
+own work rather than this code, is the account's. That judgement is semantic and
+is made on the substance rather than the wording, because most prompts carry no
+marker of where a statement should go — so the absence of one is not a reason to
+file local. The server names the two destinations and leaves the judgement to
+the caller. `recall_memory` searches both
+memories in one call, so one question gets one answer: the best statement wins
+whichever memory it is in, and every statement names its own scope. Forgetting
+searches both memories too, so a caller who has lost track of which one meant it
+still gets the right one removed.
 
-**Forgetting matches the words, never the meaning.** Pass the exact text a read gave you and that statement is removed; pass anything else and nothing is, and the answer says so. Two statements with the same text is also a refusal rather than a deletion of both, because a memory that can lose two statements to one vague query cannot be trusted with the user's decisions. A forgotten statement takes its own history with it, and it stops answering at once rather than at the next rebuild.
-
-**A handoff is one statement, not a list of them.** It is filed under the reserved kind `HANDOFF` at the top of the project's memory, and the previous handoff is removed as part of the same call, so the caller never has to know that an older one existed. `replaced` in the answer says how many went: it was still data, and the caller is entitled to know it is gone.
-
-**A read takes a query, and returns only what matched.** These memories grow by appending, so handing one to a model whole would spend the context window on the file instead of on the work. A read answers in three stages:
-
-1. **Words**, against an FTS5 index of the scope's own statements. Every query term is required together first, because a question like "where does the draft live" means that; if nothing holds them all, the two rarest words are tried alone, so an over-strict conjunction never answers with nothing. English stop words are dropped before either attempt — the word side requires every term it is given, so a term no statement contains does not narrow the answer, it empties it.
-2. **Meaning**, against the vector of every statement in the scope, by exact scan. A unit below a cosine floor of 0.72 is dropped, and if the best candidate itself is below the floor the whole dense side abstains rather than returning the nearest thing. A model that is not resident, or vectors built by a different model, are reported as unavailable instead of answered worse.
-3. **Order**, by weighted reciprocal rank fusion — lexical at 1.25, dense at 1.0, both over rank 60 — and then a local English cross-encoder reorders the first ten candidates, which is what a memory of one-line statements needs and what a single vector cannot do.
-4. **Recency**, last and only as a bonus. Every statement is dated when it is recorded, and among the statements that matched about as well, the newest is worth `recency_bonus` of its own score, the next half of that, and so on. At the default of ten per cent a materially better match still comes first and a close one does not; it is a knob rather than a guarantee, so `recency_bonus=1.0` means "the newest answer whatever it says" and `0.0` turns the preference off for a memory that must be reproducible from its scores alone.
-
-The answer carries:
-
-- the statements that matched, at most `limit` of them, best first;
-- `matched_by` on the answer and on each unit: words, meaning, or both, and `reranked` for the third stage;
-- each statement's `kind`, `added_at`, `recalls`, and `last_recalled_at`, so a statement that has never come up can be told from one that comes up constantly, and `stamp`, its position counting from the top of the document;
-- `units_pending` for statements the record holds that have no vector yet, and `document_rewritten` when a read brought the document back in line with the record — which is how a hand edit to an export is disclosed rather than lost;
-- whether anything was left out, whether the meaning side was available at all, and how long the read took.
-
-Every unit names the document it came from. Nothing else is returned: no file, no document, no whole memory, and no way to ask for one. The kind is returned as its own field, and the returned `text` is the statement itself, so a caller that recorded something gets back the words they recorded rather than the kind they filed them under.
-
-Counting a recall is one `UPDATE` per statement answered, in the same SQLite transaction the answer was read from, so it is atomic without a temporary file and a read's own work stays proportional to what it returned rather than to what the memory holds.
-
-One file sits beside the Markdown. `memory.sqlite3` is the word index and the vector index together, and it also holds what the Markdown cannot: a statement's date and how often it has been recalled. The word index inside it is rebuilt in seconds; the vectors and the counts are not rebuilt by anything. A read that finds nothing changed costs the same whatever the memory holds — measured on this repository's corpus shape, a word query costs the same over 50,000 statements as over 1,000, and a vector scan is arithmetic over a few megabytes. The one cost that varies with the memory is the re-read a read performs after a hand edit, and it is paid once per edit. The record is still the Markdown, so deleting the file costs a rebuild and a re-embedding and cannot lose a statement.
-
-**Editing the document by hand changes nothing, and the read says so.** The document is an export of the record, so a line typed into it, or a line deleted from it, is not memory. A read writes the document out from the record and reports `document_rewritten: true`, so an edit that did not take is visible at the moment it is ignored. Statements change through `set_memory_*` and `forget_memory_*`, or through the page, and each of them changes the record first. A record with nothing in it adopts the document, which is how a memory written by an older version is recovered.
-
-**A write records one typed statement, at the top.** `set_*` inserts the statement into the standing document as plain text, with no speaker attached to it: it is what you chose to remember, not something the user said and not something an assistant replied. It goes above everything already recorded, so the file reads newest first and a read can prefer new information. Two writers are serialised by a lock in the system temporary directory, so a record never lands in a file another record just rewrote, and the lock leaves nothing behind in the memory if a process dies holding it.
-
-**Every statement carries a kind.** It is the caller's: this server defines no categories, checks none, and interprets none. It is one run of block letters — `RULE`, `PLAN`, `PREFERENCE` — with no white space, held as a column of the record with the statement. It exists so a read can be narrowed to one category, which is why a read takes it as an argument. It is a field in the answer and not part of the returned text, because a caller that recorded a statement wants the statement back and not the kind it was filed under.
-
-**A missing kind is `ITEM`, not a gap.** The parameter is optional and defaults to `ITEM`, so every statement carries one even when the caller named none, and a read narrowed to `ITEM` finds the ones nobody else filed. A statement recovered from an export is `ITEM` too, because an export holds no kinds. Case is normalised rather than refused: `rule` is recorded as `RULE`.
-
-```markdown
-RULE: The user's decision is final and is not revisited without being asked.
-```
+**Record after recalling.** The instructions say so, and the tools are built for
+it: a recall that returns something covering the same thing means a second copy
+would make the answer worse, and one that contradicts it means that statement
+should be forgotten first. Forgetting matches the words and never the meaning, so
+it removes that statement or nothing, and a text that matches more than one
+removes none and names them.
 
 ## Browser view
 
@@ -211,13 +193,13 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 2 | The project is bound at startup, and the project tools take no project argument | one session means one project, so local memory cannot be written into the wrong one |
 | 3 | Global memory keeps UltraRAG's layout in the storage tree | the shared memory stays where a UltraRAG UI already reads it |
 | 4 | The file name and the scope layout are UltraRAG's, and the two kinds share one implementation | a project's memory and the global one have one shape, so either can be read the same way, and a UltraRAG UI finds the global memory where it looks. What is in that file is now an export rather than the record — choice 33 |
-| 5 | The surface is seven memory tools, and this server is not a UltraRAG pipeline node | UltraRAG's server base class registers a pipeline `build` tool, and its runner wires servers through generated `server.yaml` files and `output=` annotations. Both belong to a pipeline deployment, so this package ships neither and depends on no UltraRAG code: memory here is a complete solution for a project and an account, served to agents and people directly, not a stage inside someone else's pipeline |
+| 5 | The surface is four memory tools, and this server is not a UltraRAG pipeline node | UltraRAG's server base class registers a pipeline `build` tool, and its runner wires servers through generated `server.yaml` files and `output=` annotations. Both belong to a pipeline deployment, so this package ships neither and depends on no UltraRAG code: memory here is a complete solution for a project and an account, served to agents and people directly, not a stage inside someone else's pipeline |
 | 6 | The reference revision and its captured output are committed and tested | the format cannot drift quietly: a change fails `tests/test_fidelity.py` |
 | 7 | The browser view is the shared `ui-ultra-rag-mcp` package through a thin adapter, pinned by commit | interface code stays in one repository, and this package keeps no second UI |
 | 8 | The page reaches memory only through this server: no directory is handed to the browser | one reader and one writer per file, and the page shows what an agent reads |
 | 9 | Replacing the standing document is this package's own write, guarded by the digest the page read | upstream only creates that document from its template, and a plain overwrite could drop an agent's write |
 | 10 | Global memory defaults to this account's home data directory, and moves by flag or variable | it belongs to the account rather than to a project, and the default follows the sibling repositories' pattern: one flag, one variable, a place in the home directory |
-| 11 | The tool names are renamed to two verbs and two scopes, and upstream's names are not re-exposed | the agent's only decision should be which kind of memory it is, so the scope is in the name and there is nothing else to choose between |
+| 11 | The tools are named for what they do — record, recall, forget — and the memory is a `scope` argument rather than a second tool | an agent should choose an operation and a memory, not pick between two tools that differ by a word in their name. Two verbs became four operations with one name each, and a read searches both memories at once because one question deserves one answer. Upstream's two tools are not re-exposed under any name |
 | 12 | A read takes a query and answers it, and no tool returns a memory whole | a memory grows by appending; reading it whole spends the context window on the file instead of on the work, and would be unusable after a few weeks |
 | 13 | The search runs over an FTS5 index built from the memory's own document, kept beside it and disposable | a read is then a lookup and a page of rows rather than a pass over the whole memory, so its cost does not grow with it; the document stays the record, so an index is never the thing that is true |
 | 14 | The index follows the files instead of leading them, and no write path updates it | a memory edited by hand or by a UltraRAG UI is read correctly, because a read compares each file against what was indexed and re-reads only what changed |
@@ -244,6 +226,9 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 33 | The record is the table, and `MEMORY.md` is an export of it | a memory is meant to be a thing a person owns, and a SQLite file is a thing a person cannot read, diff, commit, or carry. Upstream's whole design is a Markdown file in a project's repository, and a UltraRAG UI reads the global one from the shared storage tree; a record that is not a file breaks both. The table holds every statement, its kind, its position, its date, and its count, and the file is written from it. What is given up is stated rather than implied: a hand edit to the file does not take and is disclosed, a kind is a column and so is asked for rather than searched for, and a file recovered from an export has the words in the right order with every statement undated and filed as `ITEM` |
 | 34 | A statement's kind is a column, not a prefix on its line | `RULE: the draft lives in docs/` is a tagged line, and a file of them reads as data rather than as something a person wrote — which is what a memory is for. The kind is still one run of block letters and still the caller's, and it is still returned with every answer; what changed is that it is held with the statement instead of inside its text, so a read narrows to a category rather than searching for a word that is no longer there. A file written before this is read once on upgrade and its prefixes become kinds |
 | 35 | The export holds the statements and nothing else | A file that carried the kinds, the dates, and the counts would be a second record to keep in step, and keeping two in step is how a memory loses a statement. So the file is a rendering: the words, in order. It is regenerated on every write, so it cannot drift; it is not read, so it cannot be wrong; and a memory lost with its database comes back as what was said rather than as how it was said, which is the honest limit of a file that was never a backup |
+
+| 36 | A recall searches both memories and ranks the results together | a caller asking what is remembered is asking one question, and the answer is the best statement from either memory rather than the best from each in turn. The scores are the same measure in every scope, so a statement from the account's memory does not outrank a better match from the project's, and every statement names the scope it came from so the caller can say which memory it was quoting |
+| 37 | `scope` is one argument with `local` as its default, rather than a tool per memory | a project fact written to the account's memory is wrong everywhere else and a standing instruction left in one project goes unnoticed in the rest. One tool with a defaulted argument makes the project the default that a caller has to choose against, and it leaves the two memories named in one place instead of across seven tool names |
 
 ## Develop and test
 

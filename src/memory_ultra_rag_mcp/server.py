@@ -68,6 +68,12 @@ UI_PORT_ENV_VAR = "MEMORY_ULTRARAG_UI_PORT"
 DEFAULT_RESULT_LIMIT = 10
 MAX_RESULT_LIMIT = 50
 
+#: The two memories. There is one tool for each verb and a `scope` on the two that
+#: can be told apart, so an agent chooses what to remember and where it goes, and
+#: never has to pick between two tools that differ only by a word in their name.
+LOCAL_SCOPE = "local"
+GLOBAL_SCOPE = "global"
+
 ContentParameter = Annotated[
     str,
     Field(
@@ -82,15 +88,29 @@ KindParameter = Annotated[
     Field(
         default=DEFAULT_KIND,
         description=(
-            "The kind to file it under: one word in block letters, no white "
-            "space. RULE for an instruction or a standing fact, PLAN for what the "
-            "project is meant to be or achieve, PREFERENCE for what the user "
-            "likes, CORRECTION for something to stop doing, and any other word if "
-            "the statement fits one better. The same word for the same kind of "
-            "thing, because a read filtered by kind returns everything filed under "
-            "it. If nothing fits, ITEM: it is a kind like any other and a "
-            "statement filed under it is found by asking for it. Case is recorded "
-            "in block letters. Nothing here interprets the word."
+            "The kind to file it under, chosen from what the statement means. "
+            "RULE for an instruction or a standing fact, PLAN for what the project "
+            "is meant to be or achieve, PREFERENCE for what the user likes, "
+            "CORRECTION for something to stop doing, and any other word in block "
+            "letters if the statement fits one better. The same word for the same "
+            "kind of thing, because a recall filtered by kind returns everything "
+            "filed under it. If nothing fits, ITEM: it is a kind like any other, "
+            "and a statement filed under it is found by asking for it. Nothing "
+            "here interprets the word."
+        ),
+    ),
+]
+ScopeParameter = Annotated[
+    str,
+    Field(
+        default=LOCAL_SCOPE,
+        description=(
+            'Where the statement belongs. "local" is this project, inside the '
+            'repository, and is the default. "global" is across projects: the '
+            "account's memory, shared by every project on this machine. Read it "
+            "off what the user means and how far it reaches rather than off the "
+            "wording, because most prompts carry no marker of where a statement "
+            "should go."
         ),
     ),
 ]
@@ -98,10 +118,10 @@ ForgetParameter = Annotated[
     str,
     Field(
         description=(
-            "The exact `text` of the one statement to remove, as a read returned "
-            "it: not a summary, not a fragment, and not the kind. The match is on "
-            "those words and never on meaning, so it removes that statement or "
-            "nothing."
+            "The exact `text` of the one statement to remove, as a recall "
+            "returned it: not a summary, not a fragment, and not the kind. The "
+            "match is on those words and never on meaning, so it removes that "
+            "statement or nothing."
         )
     ),
 ]
@@ -111,7 +131,7 @@ HandoffParameter = Annotated[
         description=(
             "This session's handoff, in a few sentences: what is done, what is in "
             "flight, and what the next session does first. It replaces the previous "
-            "handoff in this project."
+            "handoff in this project, which is a project's own state."
         )
     ),
 ]
@@ -131,7 +151,7 @@ KindFilterParameter = Annotated[
         default=None,
         description=(
             "Return only the statements filed under this kind, one word in block "
-            "letters. A kind is a column of the record and not part of a "
+            "letters. A kind is a column of the record rather than part of a "
             "statement's words, so it is asked for here rather than searched for."
         ),
     ),
@@ -140,7 +160,7 @@ LimitParameter = Annotated[
     int,
     Field(
         description=(
-            f"How many matched statements to return, at most {MAX_RESULT_LIMIT}. "
+            f"How many statements to return across both memories, at most {MAX_RESULT_LIMIT}. "
             "This caps matches, not the size of a file read."
         )
     ),
@@ -217,147 +237,164 @@ def create_server(
         lifespan=lifespan,
     )
 
-    @server.tool(name="set_memory_global", annotations=WRITE_ANNOTATIONS)
-    def set_memory_global(
-        content: ContentParameter, kind: KindParameter = DEFAULT_KIND
+    @server.tool(name="record_memory", annotations=WRITE_ANNOTATIONS)
+    def record_memory(
+        content: ContentParameter,
+        kind: KindParameter = DEFAULT_KIND,
+        scope: ScopeParameter = LOCAL_SCOPE,
     ) -> dict[str, Any]:
-        """Records one statement that applies everywhere on this account.
+        """Records one statement in this account's or this project's memory.
 
-        What is true of the user, and an instruction they gave once and mean
-        everywhere, go here. It goes to the top of the account's memory, and every
-        project on this account can read it.
+        Call it for something meant to hold beyond this reply: a rule, a
+        principle, a decision, a correction, a preference, a path. Not for a
+        request that is finished when it is answered.
+
+        Recall first, with words covering the same thing. If a statement comes
+        back that says the same, record nothing. If one comes back that
+        contradicts it, forget that one first.
+
+        `scope` decides where it goes. "local" is this project, inside the
+        repository. "global" is across projects, in the account's memory. Choose
+        it from what the user means and how far it reaches — a fact about this
+        code, a path, a convention here is local; a preference about how they
+        want to be spoken to, or a rule about their own work rather than this
+        repository, is global. Prompts rarely say so, so judge the substance and
+        not the wording.
         """
-        return _recorded(engine, "global", config.global_directory, content, kind)
+        return _recorded(engine, content, kind, scope, config)
 
-    @server.tool(name="set_memory_local", annotations=WRITE_ANNOTATIONS)
-    def set_memory_local(
-        content: ContentParameter, kind: KindParameter = DEFAULT_KIND
-    ) -> dict[str, Any]:
-        """Records one statement about this project.
-
-        A decision, a path, a convention, or anything else that is true here and
-        would be wrong in another project goes here. It goes to the top of this
-        project's memory, inside the repository under `.memory-rag`, and travels
-        with the project.
-        """
-        return _recorded(engine, "local", config.local_directory, content, kind)
-
-    @server.tool(name="get_memory_global", annotations=READ_ONLY_ANNOTATIONS)
-    def get_memory_global(
+    @server.tool(name="recall_memory", annotations=READ_ONLY_ANNOTATIONS)
+    def recall_memory(
         query: QueryParameter,
-        limit: LimitParameter = DEFAULT_RESULT_LIMIT,
         kind: KindFilterParameter = None,
-    ) -> dict[str, Any]:
-        """Returns the account's statements that match a query.
-
-        It matches by words and by meaning, and returns the statements themselves
-        rather than an answer to a question about them. Each one comes with its
-        kind, when it was added, and how often it has been recalled.
-        """
-        return _answer(
-            engine,
-            "global",
-            config.global_directory,
-            query,
-            limit,
-            kind,
-        )
-
-    @server.tool(name="get_memory_local", annotations=READ_ONLY_ANNOTATIONS)
-    def get_memory_local(
-        query: QueryParameter,
         limit: LimitParameter = DEFAULT_RESULT_LIMIT,
-        kind: KindFilterParameter = None,
     ) -> dict[str, Any]:
-        """Returns this project's statements that match a query.
+        """Returns what is remembered that matches these words.
 
-        It matches by words and by meaning, and returns the statements themselves
-        rather than an answer to a question about them. Each one comes with its
-        kind, when it was added, and how often it has been recalled. No other
-        project's memory is reachable from here.
+        It searches this project's memory and the account's memory together and
+        ranks the results by how well they match, so the best statement wins
+        whichever memory it is in. Each one names its scope.
+
+        Give it a few words, not a sentence. When nothing comes back, that is
+        what the search found: try other words, or pass a kind.
         """
-        return _answer(
-            engine,
-            "local",
-            config.local_directory,
-            query,
-            limit,
-            kind,
-        )
+        return _recalled(engine, query, kind, limit, config)
 
-    @server.tool(name="forget_memory_global", annotations=WRITE_ANNOTATIONS)
-    def forget_memory_global(text: ForgetParameter) -> dict[str, Any]:
-        """Removes one statement from the account's memory.
+    @server.tool(name="forget_memory", annotations=WRITE_ANNOTATIONS)
+    def forget_memory(
+        text: ForgetParameter, scope: ScopeParameter | None = None
+    ) -> dict[str, Any]:
+        """Removes one statement that is no longer true.
 
-        Pass the exact `text` a read returned. The match is on those words and
-        never on meaning, so it removes that statement or nothing; if the text
-        matches more than one statement, nothing is removed and the answer names
-        them.
+        Pass the exact `text` a recall returned. It matches words and never
+        meaning, so it removes that statement or nothing: if the text matches
+        more than one, nothing is removed and the answer names them.
+
+        Use it when a recalled statement is contradicted, and when a statement
+        has simply stopped being true.
         """
-        return _forgotten(engine, config.global_directory, text)
+        return _forgotten(engine, text, scope, config)
 
-    @server.tool(name="forget_memory_local", annotations=WRITE_ANNOTATIONS)
-    def forget_memory_local(text: ForgetParameter) -> dict[str, Any]:
-        """Removes one statement from this project's memory.
+    @server.tool(name="record_handoff", annotations=WRITE_ANNOTATIONS)
+    def record_handoff(content: HandoffParameter) -> dict[str, Any]:
+        """Records this session's handoff for the next one, replacing the last.
 
-        Pass the exact `text` a read returned. The match is on those words and
-        never on meaning, so it removes that statement or nothing; if the text
-        matches more than one statement, nothing is removed and the answer names
-        them.
+        One statement at the top of this project's memory. The previous handoff
+        is removed as part of the same call, so a project holds one handoff
+        rather than a list of them, and `replaced` says how many went.
+
+        Write what the next session needs to pick the work up: what is done,
+        what is in flight, and what to do first.
         """
-        return _forgotten(engine, config.local_directory, text)
-
-    @server.tool(name="set_memory_handoff", annotations=WRITE_ANNOTATIONS)
-    def set_memory_handoff(content: HandoffParameter) -> dict[str, Any]:
-        """Records this session's handoff, replacing the previous one.
-
-        One statement at the top of this project's memory, under the kind
-        `HANDOFF`. The previous handoff is removed as part of the same call, so a
-        project holds one rather than a list, and `replaced` in the answer is how
-        many went. Write what the next session needs to pick the work up: what is
-        done, what is in flight, and what to do first.
-        """
-        return _handed_off(engine, config.local_directory, content)
+        return _handed_off(engine, content, config)
 
     return server
 
 
+def _scope_directory(config: ServerConfig, scope: str) -> tuple[str, Path]:
+    """Return the memory a scope names, refusing any other value."""
+
+    if scope == LOCAL_SCOPE:
+        return scope, config.local_directory
+    if scope == GLOBAL_SCOPE:
+        return scope, config.global_directory
+    raise ToolError(f"scope must be {LOCAL_SCOPE!r} or {GLOBAL_SCOPE!r}, not {scope!r}")
+
+
 def _recorded(
     engine: Retrieval,
-    scope: str,
-    directory: Path,
     content: str,
-    kind: str,
+    kind: str | None,
+    scope: str,
+    config: ServerConfig,
 ) -> dict[str, Any]:
-    """Record one typed statement, reporting what the semantic side has queued.
+    """Record one statement in the memory the scope names."""
 
-    The statement is durable before this returns, and the vector is queued rather
-    than computed here, so a write costs one append and no inference. A model
-    that cannot be fetched leaves the unit pending, which the read reports, and
-    never fails the write.
-    """
-
-    del scope
+    name, directory = _scope_directory(config, scope)
     try:
-        return engine.record(directory, content, kind)
+        recorded = engine.record(content=content, directory=directory, kind=kind)
+    except ModelError as error:
+        raise ToolError(str(error)) from error
+    return {"scope": name, **recorded}
+
+
+def _recalled(
+    engine: Retrieval,
+    query: str,
+    kind: str | None,
+    limit: int,
+    config: ServerConfig,
+) -> dict[str, Any]:
+    """Answer one read from both memories, ranked together."""
+
+    if not str(query or "").strip():
+        raise ToolError(
+            "query must not be empty: this server answers a question about what is "
+            "remembered rather than returning a memory whole, because a memory "
+            "grows and returning all of it would spend the context window on it"
+        )
+    capped = max(1, min(int(limit), MAX_RESULT_LIMIT))
+    try:
+        return engine.answer_both(
+            directories={
+                LOCAL_SCOPE: config.local_directory,
+                GLOBAL_SCOPE: config.global_directory,
+            },
+            query=str(query),
+            limit=capped,
+            kind=kind,
+        )
+    except (IndexError, StoreError) as error:
+        raise ToolError(str(error)) from error
+
+
+def _forgotten(
+    engine: Retrieval,
+    text: str,
+    scope: str | None,
+    config: ServerConfig,
+) -> dict[str, Any]:
+    """Remove the one statement a text is exactly, from one memory or either."""
+
+    directories = {
+        LOCAL_SCOPE: config.local_directory,
+        GLOBAL_SCOPE: config.global_directory,
+    }
+    if scope is not None:
+        _scope_directory(config, scope)
+    try:
+        return engine.forget(text=text, directories=directories, scope=scope)
     except ModelError as error:
         raise ToolError(str(error)) from error
 
 
-def _forgotten(engine: Retrieval, directory: Path, text: str) -> dict[str, Any]:
-    """Remove the one statement this text is exactly, or refuse to remove any."""
+def _handed_off(
+    engine: Retrieval, content: str, config: ServerConfig
+) -> dict[str, Any]:
+    """Put this session's handoff at the top of this project's memory."""
 
     try:
-        return engine.forget(directory, text)
-    except ModelError as error:
-        raise ToolError(str(error)) from error
-
-
-def _handed_off(engine: Retrieval, directory: Path, content: str) -> dict[str, Any]:
-    """Put this session's handoff on top, and report the one it replaced."""
-
-    try:
-        return engine.handoff(directory, content)
+        return engine.handoff(config.local_directory, content)
     except ModelError as error:
         raise ToolError(str(error)) from error
 

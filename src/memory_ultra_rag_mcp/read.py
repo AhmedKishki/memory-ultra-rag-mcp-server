@@ -63,6 +63,7 @@ class Answer:
     truncated: bool = False
     reranked: bool = False
     document_rewritten: bool = False
+    scope_counts: dict[str, int] | None = None
     hint: str | None = None
     elapsed_ms: float = 0.0
 
@@ -85,6 +86,65 @@ class Answer:
         if self.hint is not None:
             answer["hint"] = self.hint
         return answer
+
+
+def merge_answers(
+    answers: list[Answer],
+    *,
+    limit: int,
+) -> Answer:
+    """Combine one answer per scope into a single ranked answer.
+
+    The scores are the same measure in every scope — a fused rank sum, with the
+    recency bonus applied — so a statement is placed by how well it matched rather
+    than by which memory it came from. A statement from the account's memory does
+    not outrank a better match from the project's, and the other way round.
+
+    The counts are reported per scope because a caller quoting a statement has to
+    say which memory it came from, and that is a fact about the answer rather than
+    something to work out afterwards.
+    """
+
+    started = time.perf_counter()
+    combined = Answer(scope="both", query=answers[0].query if answers else "")
+    ranked: list[tuple[float, int, dict[str, Any]]] = []
+    for answer in answers:
+        for unit in answer.units:
+            # Every statement names the memory it came from: a caller quoting one
+            # has to say which, and that is a fact about the answer.
+            stated = {"scope": answer.scope, **unit}
+            ranked.append(
+                (float(unit.get("score") or 0.0), int(unit.get("stamp") or 0), stated)
+            )
+    ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    combined.units = [unit for _score, _stamp, unit in ranked[: max(int(limit), 1)]]
+    combined.scope_counts = {answer.scope: len(answer.units) for answer in answers}
+    combined.truncated = any(answer.truncated for answer in answers) or (
+        len(ranked) > max(int(limit), 1)
+    )
+    combined.units_pending = sum(answer.units_pending for answer in answers)
+    combined.document_rewritten = any(answer.document_rewritten for answer in answers)
+    combined.reranked = any(answer.reranked for answer in answers)
+    combined.semantic_available = all(answer.semantic_available for answer in answers)
+    matched = {answer.matched_by for answer in answers}
+    if "both" in matched:
+        combined.matched_by = "both"
+    elif "semantic" in matched:
+        combined.matched_by = "semantic"
+    else:
+        combined.matched_by = "lexical"
+    if not combined.units:
+        combined.hint = (
+            "no statement matched those words, in this project or on the account. "
+            "Try other words, or recall with a kind to see everything filed under "
+            "one."
+            if combined.semantic_available
+            else "no statement matched those words, and the meaning side was not "
+            "available: only the exact words would have found anything. Try other "
+            "words."
+        )
+    combined.elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return combined
 
 
 def _fuse(

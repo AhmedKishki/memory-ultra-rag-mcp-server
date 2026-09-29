@@ -20,6 +20,7 @@ is unmeasured, and nothing in this package claims it.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,8 @@ from typing import Any
 from .index import MemoryIndex
 from .maintenance import EmbeddingWorker, embed_pending, warm_models
 from .models import Embedder, ModelError, Reranker
-from .read import answer_read
-from .store import HANDOFF_KIND, StoreError, normalise, statement_kind
+from .read import Answer, answer_read, merge_answers
+from .store import HANDOFF_KIND, Statement, StoreError, statement_kind
 from .vectors import VectorStore
 
 __all__ = ["Retrieval", "RetrievalSettings"]
@@ -116,6 +117,15 @@ class RetrievalSettings:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class Found:
+    """One statement that matched an exact text, and the memory it was found in."""
+
+    statement: Statement
+    scope: str
+    directory: Path
+
+
 class Retrieval:
     """One process's retrieval: its models, its policy, and its per-scope workers.
 
@@ -162,20 +172,18 @@ class Retrieval:
 
     def record(
         self,
-        directory: Path,
-        content: str,
-        kind: str | None = None,
         *,
+        content: str,
+        directory: Path,
+        kind: str | None = None,
         replace_kind: str | None = None,
     ) -> dict[str, Any]:
-        """Record one typed statement, and write the document out again.
+        """Record one statement in one memory, and say what was filed where.
 
-        The statement is a row: its text, the type the caller named, its place at
-        the top of the document, and the time it was recorded. The document is then
-        written out from the record, because a memory nobody can open is not one
-        anybody can check. The type is the caller's own category, passed through
-        without being interpreted here, and echoed back so a write can be confirmed
-        against what was actually filed. A caller that names no type gets `ITEM`.
+        The statement is a row: its text, the kind the caller named, its place at
+        the top of the document, and the time it was recorded. The document is
+        then written out from the record, because a memory nobody can open is not
+        one anybody can check.
         """
 
         statement = str(content or "").strip()
@@ -188,18 +196,13 @@ class Retrieval:
         with MemoryIndex(directory) as index:
             key, replaced = index.insert(statement, label, replace_kind=replace_kind)
             written = index.write_export()
-        queued = embed_pending(
-            directory,
-            self.embedder,
-            self.worker_for(directory),
-            changed=directory / "MEMORY.md",
-        )
+        queued = embed_pending(directory, self.embedder, self.worker_for(directory))
         return {
-            "status": "handoff" if replace_kind is not None else "set",
+            "status": "recorded",
             "kind": label,
-            "replaced": replaced,
             "text": statement,
             "key": key,
+            "replaced": replaced,
             "directory": str(directory),
             "standing_document": str(directory / "MEMORY.md"),
             "document_written": written,
@@ -208,68 +211,23 @@ class Retrieval:
             "embedded": queued == 0,
         }
 
-    def forget(self, directory: Path, query: str) -> dict[str, Any]:
-        """Remove the one statement this query is exactly, and report what went.
-
-        The match is on the words, never on meaning, and a query that matches more
-        than one statement removes none of them. The row goes first, so the
-        statement is gone before anything derived from it is; then the document is
-        written out, its rows are dropped, and its vector is dropped, so it cannot
-        answer again and it leaves no count behind for a statement that no longer
-        exists.
-        """
-
-        statement = str(query or "").strip()
-        if not statement:
-            raise ModelError(
-                "query must not be empty: forgetting takes the exact text of the "
-                "statement to remove, so read it first if you do not have it"
-            )
-        with MemoryIndex(directory) as index:
-            found = index.forget(normalise(statement))
-            if not found:
-                raise ModelError(
-                    "nothing matched exactly, so nothing was forgotten. This "
-                    "server forgets on an exact match only: read the statement "
-                    "first, then forget the text the read returned."
-                )
-            if len(found) > 1:
-                listed = "; ".join(f"[{item.kind}] {item.text}" for item in found[:5])
-                raise ModelError(
-                    f"{len(found)} statements match that text exactly, so none "
-                    f"were forgotten: {listed}. Forget one that is unique, or "
-                    "remove the duplicates by hand in the record."
-                )
-            removed = found[0]
-            index.write_export()
-        vectors = 0
-        identity = self.embedder.identity
-        with VectorStore(directory, identity.name, identity.dimension) as store:
-            vectors = store.forget([removed.key])
-        return {
-            "status": "forgotten",
-            "forgotten": 1,
-            "kind": removed.kind,
-            "text": removed.text,
-            "position": removed.position,
-            "recalls_removed": removed.recalls,
-            "vectors_removed": vectors,
-            "directory": str(directory),
-            "standing_document": str(directory / "MEMORY.md"),
-        }
-
     def handoff(self, directory: Path, content: str) -> dict[str, Any]:
         """Put this session's handoff at the top, replacing the last one.
 
-        A handoff is one statement filed under the reserved type `HANDOFF`. The
-        previous one is removed by that type, so a handoff is a standing single
+        A handoff is one statement filed under the reserved kind `HANDOFF`. The
+        previous one is removed by that kind, so a handoff is a standing single
         entry rather than a list of them, and the caller never has to remember
         that an older one was there. The count of what it replaced is returned,
         because a replaced statement is still data the caller may want to know it
         lost.
         """
 
-        return self.record(directory, content, HANDOFF_KIND, replace_kind=HANDOFF_KIND)
+        return self.record(
+            directory=directory,
+            content=content,
+            kind=HANDOFF_KIND,
+            replace_kind=HANDOFF_KIND,
+        )
 
     def maintain(self, directory: Path) -> dict[str, Any]:
         """Bring the document in line with the record, and say whether it was stale.
@@ -302,12 +260,22 @@ class Retrieval:
         limit: int,
         kind: str | None = None,
     ) -> dict[str, Any]:
-        """Answer one read, in words and in meaning.
+        """Answer one read of one memory, in words and in meaning."""
 
-        A ``kind`` narrows the answer to one category. The type is a
-        column of the record rather than a word in the text, so it is asked for
-        rather than searched for.
-        """
+        return self.read(
+            scope=scope, directory=directory, query=query, limit=limit, kind=kind
+        ).payload()
+
+    def read(
+        self,
+        *,
+        scope: str,
+        directory: Path,
+        query: str,
+        limit: int,
+        kind: str | None = None,
+    ) -> Answer:
+        """Answer one read of one memory, and return the object it built."""
 
         return answer_read(
             scope=scope,
@@ -318,4 +286,106 @@ class Retrieval:
             embedder=self.embedder,
             reranker=self.reranker,
             policy=self.policy,
-        ).payload()
+        )
+
+    def answer_both(
+        self,
+        *,
+        directories: Mapping[str, Path],
+        query: str,
+        limit: int,
+        kind: str | None = None,
+    ) -> dict[str, Any]:
+        """Answer one read from every memory, ranked together.
+
+        A caller asking what is remembered is asking one question, and the answer
+        is the best statement from either memory rather than the best from each in
+        turn. The scopes are searched in the order given and the results merged by
+        score, so a statement is placed by how well it matched.
+        """
+
+        answers = [
+            self.read(
+                scope=scope,
+                directory=directory,
+                query=query,
+                limit=limit,
+                kind=kind,
+            )
+            for scope, directory in directories.items()
+        ]
+        merged = merge_answers(answers, limit=limit)
+        payload = merged.payload()
+        payload.pop("scope", None)
+        payload["scopes"] = list(directories)
+        payload["scope_counts"] = merged.scope_counts
+        return payload
+
+    def forget(
+        self,
+        *,
+        text: str,
+        directories: Mapping[str, Path],
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove the one statement this text is exactly, from one memory or either.
+
+        The match is on the words and never on meaning, across every memory named:
+        a statement the user has replaced is often worded the same way in one
+        place and not the other, and a caller who cannot say which memory meant it
+        should not have to guess. Two matches is a refusal, whichever memory they
+        are in.
+        """
+
+        if not str(text or "").strip():
+            raise ModelError(
+                "text must not be empty: forgetting takes the exact text of the one "
+                "statement to remove, so recall it first if you do not have it"
+            )
+        searched = (
+            {scope: directories[scope]} if scope in directories else dict(directories)
+        )
+        found: list[Found] = []
+        for name, directory in searched.items():
+            with MemoryIndex(directory) as index:
+                found.extend(
+                    Found(statement, name, directory)
+                    for statement in index.matches(text)
+                )
+        if not found:
+            raise ModelError(
+                "nothing matched exactly, so nothing was forgotten. This server "
+                "forgets on an exact match only: recall the statement first, then "
+                "forget the text the recall returned."
+            )
+        if len(found) > 1:
+            # Each match is labelled with both, because the advice that follows
+            # depends on which of the two distinguishes them.
+            listed = "; ".join(
+                f"[{item.scope} {item.statement.kind}] {item.statement.text}"
+                for item in found[:5]
+            )
+            raise ModelError(
+                f"{len(found)} statements match that text exactly, so none were "
+                f"forgotten: {listed}. Pass a scope if they are in different "
+                "memories, or forget a statement whose text is unique."
+            )
+        removed = found[0]
+        with MemoryIndex(removed.directory) as index:
+            index.drop(removed.statement.key)
+            # The document is an export of the record, so it is written out again
+            # here or the removed statement is still on the page.
+            index.write_export()
+        identity = self.embedder.identity
+        with VectorStore(removed.directory, identity.name, identity.dimension) as store:
+            vectors = store.forget([removed.statement.key])
+        return {
+            "status": "forgotten",
+            "forgotten": 1,
+            "scope": removed.scope,
+            "kind": removed.statement.kind,
+            "text": removed.statement.text,
+            "recalls_removed": removed.statement.recalls,
+            "vectors_removed": vectors,
+            "directory": str(removed.directory),
+        }

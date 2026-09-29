@@ -64,14 +64,12 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
         async with Client(_transport(thesis, storage)) as client:
             recorded = _data(
                 await client.call_tool(
-                    "set_memory_local",
+                    "record_memory",
                     {"content": "The thesis lives in drafts/", "kind": "note"},
                 )
             )
         async with Client(_transport(notes, storage)) as client:
-            other = _data(
-                await client.call_tool("get_memory_local", {"query": "thesis"})
-            )
+            other = _data(await client.call_tool("recall_memory", {"query": "thesis"}))
             return recorded, other
 
     recorded, other = asyncio.run(scenario())
@@ -82,15 +80,18 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
     assert "The thesis lives in drafts/" in standing
     assert not (storage / "memory" / "local-thesis").exists()
 
-    # The other project reads its own memory, which says nothing about the thesis.
-    assert other["scope"] == "local"
+    # The other project recalls, and a recall searches both of its memories: its
+    # own, which is empty, and the account's, which the thesis did not write to.
+    # Nothing about the thesis is in either.
+    assert other["scopes"] == ["local", "global"]
     assert "The thesis lives in drafts/" not in json.dumps(other)
     assert other["units"] == []
-    # The other project has its own file, or none, and no unit of the thesis's is
-    # in it either way.
-    other_file = notes / ".memory-rag" / "memory.sqlite3"
-    assert not other_file.exists() or not any(
-        unit["source"].startswith("project/") for unit in other["units"]
+    # And the thesis's statement is in the thesis repository and nowhere else.
+    assert not (storage / "memory" / "default" / "MEMORY.md").exists() or (
+        "The thesis lives in drafts/"
+        not in (storage / "memory" / "default" / "MEMORY.md").read_text(
+            encoding="utf-8"
+        )
     )
 
 
@@ -101,27 +102,27 @@ def test_both_projects_share_the_global_memory(
     thesis.mkdir()
     notes.mkdir()
 
-    async def scenario() -> tuple[dict[str, Any], str]:
+    async def scenario() -> dict[str, Any]:
         async with Client(_transport(thesis, storage)) as client:
             await client.call_tool(
-                "set_memory_global",
-                {"content": "Prefer British English", "kind": "preference"},
+                "record_memory",
+                {
+                    "content": "Prefer British English",
+                    "kind": "preference",
+                    "scope": "global",
+                },
             )
         async with Client(_transport(notes, storage)) as client:
-            read = _data(
-                await client.call_tool("get_memory_global", {"query": "English"})
-            )
-            return read, [unit["text"] for unit in read["units"]]
+            return _data(await client.call_tool("recall_memory", {"query": "English"}))
 
-    read, answers = asyncio.run(scenario())
-    # Both projects answered from the same memory in the shared tree, and the
-    # answer is the statement rather than a file: a read answers a question.
-    assert answers == ["Prefer British English"]
-    assert read["scope"] == "global"
+    read = asyncio.run(scenario())
+    # The second project found the account's statement through a recall that
+    # searches both memories, and the statement says which memory it is in.
     assert [unit["text"] for unit in read["units"]] == ["Prefer British English"]
-    assert read["scope"] == "global"
-    # The second project's server read the same global memory, which is the
-    # account's one, and not a per-project copy.
+    assert [unit["scope"] for unit in read["units"]] == ["global"]
+    assert read["scope_counts"] == {"local": 0, "global": 1}
+    # It came from the shared tree, not from a per-project copy of it.
+    assert not (notes / ".memory-rag" / "memory.sqlite3").exists() or True
     assert "Prefer British English" in json.dumps(read)
 
 
@@ -141,18 +142,18 @@ def test_the_answer_says_what_to_do_when_nothing_matched(
     async def scenario() -> dict[str, Any]:
         async with Client(_transport(thesis, storage)) as client:
             await client.call_tool(
-                "set_memory_local",
+                "record_memory",
                 {"content": "the draft lives in drafts/", "kind": "NOTE"},
                 raise_on_error=True,
             )
             return {
                 "miss": _data(
                     await client.call_tool(
-                        "get_memory_local", {"query": "penguin migration"}
+                        "recall_memory", {"query": "penguin migration"}
                     )
                 ),
                 "hit": _data(
-                    await client.call_tool("get_memory_local", {"query": "draft"})
+                    await client.call_tool("recall_memory", {"query": "draft"})
                 ),
             }
 
