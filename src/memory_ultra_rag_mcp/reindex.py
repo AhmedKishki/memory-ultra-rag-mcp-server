@@ -32,6 +32,7 @@ from .index import fts5_available
 from .maintenance import reindex as rebuild_scopes
 from .models import ModelError
 from .server import _local_retrieval
+from .settings import describe_settings
 
 __all__ = ["main"]
 
@@ -75,6 +76,28 @@ def _parser() -> argparse.ArgumentParser:
             "Rebuild the word index only, and report what still needs a vector. "
             "Used when the model cannot be fetched."
         ),
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=None,
+        help=(
+            "A config.toml whose settings apply to this run, so a memory is "
+            "embedded with the models and policy the read will use."
+        ),
+    )
+    parser.add_argument(
+        "--set",
+        metavar="KEY=VALUE",
+        action="append",
+        default=[],
+        dest="set_overrides",
+        help="Override one setting for this run. Repeatable, and the strongest layer.",
+    )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print every setting in force and the layer that supplied it, then exit.",
     )
     parser.add_argument(
         "--export",
@@ -142,6 +165,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = resolve_config(
             project_root=arguments.project_root,
             storage_root=arguments.storage_root,
+            config_path=arguments.config,
+            overrides=arguments.set_overrides,
         )
     except ConfigurationError as error:
         print(f"memory-ultra-rag-reindex: {error}", file=sys.stderr)
@@ -160,7 +185,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         scopes.append(config.global_directory)
 
-    retrieval = None if arguments.no_embed else _local_retrieval()
+    # The reindex embeds with the settings the read ranks with: a memory embedded
+    # by one model and matched by another is a memory nobody can find anything in.
+    retrieval = None if arguments.no_embed else _local_retrieval(config.settings)
     if retrieval is not None:
         try:
             retrieval.warm()
@@ -186,6 +213,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for scope in scopes:
                 retrieval.worker_for(scope).stop()
 
+    if arguments.print_config:
+        print(describe_settings(config.settings))
+        return 0
     if arguments.export or arguments.export_to:
         for scope_directory, scope_report in zip(scopes, report["scopes"].values()):
             written = _export(scope_directory, arguments, len(scopes))

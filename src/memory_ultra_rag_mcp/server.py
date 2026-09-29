@@ -48,8 +48,14 @@ from .config import (
 )
 from .index import IndexError, fts5_available
 from .instructions import SERVER_INSTRUCTIONS
-from .models import DEFAULT_EMBEDDING_MODEL, LocalEmbedder, LocalReranker, ModelError
+from .models import (
+    LocalEmbedder,
+    LocalReranker,
+    ModelError,
+    model_cache_directory,
+)
 from .retrieval import Retrieval, RetrievalSettings
+from .settings import EffectiveSettings, describe_settings
 from .store import (
     DEFAULT_KIND,
     StoreError,
@@ -193,7 +199,7 @@ def create_server(
     because loading one costs seconds and a read may not pay it.
     """
     holder: dict[str, Any] = {}
-    engine = retrieval or _local_retrieval()
+    engine = retrieval or _local_retrieval(config.settings)
 
     @asynccontextmanager
     async def lifespan(_: FastMCP[Any]) -> AsyncIterator[dict[str, Any]]:
@@ -434,12 +440,20 @@ def _answer(
         raise ToolError(str(error)) from error
 
 
-def _local_retrieval(model: str = DEFAULT_EMBEDDING_MODEL) -> Retrieval:
-    """Build this process's retrieval from the local models."""
+def _local_retrieval(settings: EffectiveSettings | None) -> Retrieval:
+    """Build this process's retrieval from the settings and the local models.
 
-    embedder = LocalEmbedder(model)
-    policy = RetrievalSettings(embedding_model=embedder.identity.name)
-    reranker = LocalReranker(policy.reranker_model) if policy.reranker_model else None
+    The policy is the settings, the models are named by them, and the cache they
+    are fetched into is the one they name, so one `config.toml` decides what a
+    memory is matched with and where its model is already on disk.
+    """
+
+    policy = RetrievalSettings.from_settings(settings)
+    cache = model_cache_directory(settings.cache_root()) if settings else None
+    embedder = LocalEmbedder(policy.embedding_model, cache)
+    reranker = (
+        LocalReranker(policy.reranker_model, cache) if policy.reranker_model else None
+    )
     return Retrieval(embedder=embedder, policy=policy, reranker=reranker)
 
 
@@ -484,6 +498,35 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=None,
+        help=(
+            "A config.toml whose settings apply to this run. It is a layer: it "
+            "names only what it changes, and it wins over the account's config and "
+            "loses to the environment and to --set."
+        ),
+    )
+    parser.add_argument(
+        "--set",
+        metavar="KEY=VALUE",
+        action="append",
+        default=[],
+        dest="set_overrides",
+        help=(
+            "Override one setting for this run, e.g. "
+            "--set retrieval.recency_bonus=0. Repeatable, and the strongest layer."
+        ),
+    )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help=(
+            "Print every setting in force and the layer that supplied it, then "
+            "exit. Nothing is read or written."
+        ),
+    )
+    parser.add_argument(
         "--ui-port",
         type=int,
         default=_ui_port_from_environment(),
@@ -510,10 +553,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = resolve_config(
             project_root=arguments.project_root,
             storage_root=arguments.storage_root,
+            config_path=arguments.config,
+            overrides=arguments.set_overrides,
         )
     except ConfigurationError as error:
         print(f"{SERVER_NAME}: {error}", file=sys.stderr)
         return 2
+    if arguments.print_config:
+        # Every setting in force, and where it came from, without serving a thing.
+        print(describe_settings(config.settings))
+        return 0
     if arguments.ui_port is not None and not 1 <= arguments.ui_port <= 65535:
         print(f"{SERVER_NAME}: --ui-port must be between 1 and 65535", file=sys.stderr)
         return 2

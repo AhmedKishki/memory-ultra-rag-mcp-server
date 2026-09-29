@@ -1,0 +1,230 @@
+"""The settings: one registry, one stack of layers, and where each value came from.
+
+A memory's behaviour is decided by numbers, and this is where they are written
+down. The rules under test are the ones that keep a configuration honest: every
+setting is declared, a layer names only what it changes, an undeclared key is an
+error rather than a silent default, and a number written in a file and the same
+number written in the environment are read the same way.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from memory_ultra_rag_mcp.settings import (
+    LAYER_COMMAND_LINE,
+    LAYER_DEFAULT,
+    LAYER_ENVIRONMENT,
+    LAYER_FILE,
+    LAYER_PROJECT,
+    LAYER_USER,
+    SETTINGS,
+    SETTINGS_BY_KEY,
+    SettingsError,
+    default_config_path,
+    describe_settings,
+    merge_settings,
+    project_config_path,
+    read_config_document,
+    resolve_settings,
+    user_config_path,
+)
+
+EMPTY = {"environ": {}}
+
+
+def _overlay(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_the_packaged_file_declares_every_setting() -> None:
+    """A key in the code and a key in the file cannot drift apart."""
+
+    document = read_config_document(default_config_path(), source="default")
+
+    assert set(merge_settings({}, document, source="default")) == set(SETTINGS_BY_KEY)
+
+
+def test_every_setting_is_one_of_the_three_kinds_of_tuning() -> None:
+    assert {s.layer for s in SETTINGS} == {"identity", "runtime", "retrieval"}
+    assert all(s.doc and s.kind for s in SETTINGS)
+
+
+def test_the_defaults_are_the_ones_the_code_falls_back_to(tmp_path: Path) -> None:
+    settings = resolve_settings(tmp_path, **EMPTY)
+
+    assert settings.cosine_floor == 0.72
+    assert settings.embedding_model == "BAAI/bge-small-en-v1.5"
+    assert settings.provenance["retrieval.rrf_k"].startswith(LAYER_DEFAULT)
+
+
+def test_a_layer_names_only_what_it_changes(tmp_path: Path) -> None:
+    path = _overlay(tmp_path, "[retrieval]\nrecency_bonus = 0.5\n")
+
+    settings = resolve_settings(tmp_path, config_path=path, **EMPTY)
+
+    assert settings.recency_bonus == 0.5
+    assert settings.rrf_k == 60, "an unset key is not reset by a sibling"
+    assert settings.provenance["retrieval.recency_bonus"].startswith(LAYER_FILE)
+    assert settings.provenance["retrieval.rrf_k"].startswith(LAYER_DEFAULT)
+
+
+def test_the_user_layer_applies_and_the_project_layer_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The layer that applies globally, and the one a project may narrow it with."""
+
+    import memory_ultra_rag_mcp.settings as settings_module
+
+    project = tmp_path / "project"
+    (project / ".memory-rag").mkdir(parents=True)
+    user = _overlay(tmp_path, "[retrieval]\npool_depth = 20\n")
+    monkeypatch.setattr(settings_module, "user_config_path", lambda: user)
+    project_layer = project / ".memory-rag" / "config.toml"
+    project_layer.write_text("[retrieval]\npool_depth = 7\n", encoding="utf-8")
+
+    assert user_config_path().name == "config.toml"
+    assert project_config_path(project) == project_layer
+
+    settings = resolve_settings(project, **EMPTY)
+
+    # The account's value is in force, and the project's is the one that decides.
+    assert settings.pool_depth == 7
+    assert LAYER_PROJECT in settings.provenance["retrieval.pool_depth"]
+    # And with only the account's layer, that is what the project reads.
+    (project / ".memory-rag" / "config.toml").unlink()
+    alone = resolve_settings(project, **EMPTY)
+    assert alone.pool_depth == 20
+    assert LAYER_USER in alone.provenance["retrieval.pool_depth"]
+
+
+def test_the_environment_and_the_command_line_are_the_strongest_layers(
+    tmp_path: Path,
+) -> None:
+    path = _overlay(tmp_path, "[retrieval]\nrrf_k = 10\nbm25_weight = 2.0\n")
+
+    settings = resolve_settings(
+        tmp_path,
+        config_path=path,
+        overrides=["retrieval.rrf_k=30"],
+        environ={"MEMORY_ULTRARAG_RETRIEVAL_BM25_WEIGHT": "3.0"},
+    )
+
+    assert settings.rrf_k == 30
+    assert settings.provenance["retrieval.rrf_k"] == LAYER_COMMAND_LINE
+    assert settings.bm25_weight == 3.0
+    assert settings.provenance["retrieval.bm25_weight"].startswith(LAYER_ENVIRONMENT)
+
+
+def test_a_number_written_as_text_is_read_the_same_way_everywhere(
+    tmp_path: Path,
+) -> None:
+    """An environment variable and --set carry strings, and a file carries types."""
+
+    from_file = resolve_settings(
+        tmp_path, config_path=_overlay(tmp_path, "[retrieval]\nrrf_k = 30\n"), **EMPTY
+    )
+    from_env = resolve_settings(
+        tmp_path, environ={"MEMORY_ULTRARAG_RETRIEVAL_RRF_K": "30"}
+    )
+    from_set = resolve_settings(tmp_path, overrides=["retrieval.rrf_k=30"], **EMPTY)
+
+    assert from_file.rrf_k == from_env.rrf_k == from_set.rrf_k == 30
+
+
+def test_an_undeclared_key_is_refused_in_every_layer(tmp_path: Path) -> None:
+    with pytest.raises(SettingsError, match="unknown setting"):
+        resolve_settings(
+            tmp_path, config_path=_overlay(tmp_path, "[retrieval]\nnope = 1\n"), **EMPTY
+        )
+    with pytest.raises(SettingsError, match="unknown setting"):
+        resolve_settings(tmp_path, overrides=["retrieval.nope=1"], **EMPTY)
+
+
+def test_a_value_out_of_bounds_is_refused_by_name(tmp_path: Path) -> None:
+    with pytest.raises(SettingsError, match="at most 1"):
+        resolve_settings(tmp_path, overrides=["retrieval.recency_bonus=9"], **EMPTY)
+    with pytest.raises(SettingsError, match="at least 1"):
+        resolve_settings(tmp_path, overrides=["retrieval.rrf_k=0"], **EMPTY)
+    with pytest.raises(SettingsError, match="cosine"):
+        resolve_settings(tmp_path, overrides=["retrieval.cosine_floor=4"], **EMPTY)
+
+
+def test_a_model_setting_accepts_an_empty_string_because_it_means_something(
+    tmp_path: Path,
+) -> None:
+    """Turning the cross-encoder off is a value, not a missing one."""
+
+    settings = resolve_settings(tmp_path, overrides=["dense.reranker_model="], **EMPTY)
+
+    assert settings.reranker_model == ""
+
+
+def test_a_set_without_a_value_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(SettingsError, match="key=value"):
+        resolve_settings(tmp_path, overrides=["retrieval.rrf_k"], **EMPTY)
+
+
+def test_a_layer_that_is_not_toml_is_refused_with_its_path(tmp_path: Path) -> None:
+    path = tmp_path / "broken.toml"
+    path.write_text("this is not = = toml\n", encoding="utf-8")
+
+    with pytest.raises(SettingsError, match="not valid TOML"):
+        resolve_settings(tmp_path, config_path=path, **EMPTY)
+
+
+def test_a_named_file_that_is_missing_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(SettingsError, match="not a readable file"):
+        resolve_settings(tmp_path, config_path=tmp_path / "nowhere.toml", **EMPTY)
+
+
+def test_a_table_for_a_single_setting_is_refused(tmp_path: Path) -> None:
+    path = _overlay(tmp_path, "[retrieval]\nrrf_k = { a = 1 }\n")
+
+    with pytest.raises(SettingsError, match="single setting"):
+        resolve_settings(tmp_path, config_path=path, **EMPTY)
+
+
+def test_printing_names_every_value_and_the_layer_that_supplied_it(
+    tmp_path: Path,
+) -> None:
+    path = _overlay(tmp_path, "[retrieval]\nrecency_bonus = 0.25\n")
+
+    settings = resolve_settings(tmp_path, config_path=path, **EMPTY)
+    printed = describe_settings(settings)
+
+    for setting in SETTINGS:
+        assert setting.key in printed
+    assert "0.25" in printed
+    assert LAYER_FILE in printed
+    for section in ("[runtime]", "[retrieval]", "[dense]"):
+        assert section in printed
+
+
+def test_the_policy_the_settings_produce_is_the_read_policy(tmp_path: Path) -> None:
+    """What a read does is read off the settings, not off a second copy of them."""
+
+    from memory_ultra_rag_mcp.retrieval import RetrievalSettings
+
+    settings = resolve_settings(
+        tmp_path,
+        overrides=["retrieval.rerank_depth=3", "dense.reranker_model="],
+        **EMPTY,
+    )
+    policy = RetrievalSettings.from_settings(settings)
+
+    assert policy.rerank_depth == 3
+    assert policy.reranker_model is None
+    assert policy.embedding_model == settings.embedding_model
+    # And with no settings at all, the fallback is the same policy the file
+    # declares, so a caller that skips the files does not quietly get a
+    # different memory.
+    assert RetrievalSettings.from_settings(None) == RetrievalSettings(
+        embedding_model=SETTINGS_BY_KEY["dense.embedding_model"].coerce(
+            "BAAI/bge-small-en-v1.5", source="test"
+        )
+    )

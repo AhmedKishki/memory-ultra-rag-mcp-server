@@ -98,6 +98,54 @@ should be forgotten first. Forgetting matches the words and never the meaning, s
 it removes that statement or nothing, and a text that matches more than one
 removes none and names them.
 
+## Settings
+
+Every tunable this server reads is a setting, and the packaged file that declares
+them all is [`default.toml`](src/memory_ultra_rag_mcp/default.toml), inside the
+package. A layer above it names only what it changes, and the layers win per key,
+lowest precedence first:
+
+```text
+default.toml  <  ~/.config/memory-ultra-rag-mcp/config.toml   (the global layer)
+              <  <project>/.memory-rag/config.toml
+              <  --config PATH
+              <  MEMORY_ULTRARAG_* environment variables
+              <  --set key=value
+```
+
+**The user layer is the one that applies globally.** One file in the account's
+config directory changes every project on this account, because a memory is
+shared by every project on the account. A project may still narrow it for itself
+with its own `config.toml` inside its own state, which is what the project layer
+is for.
+
+```bash
+# What is in force, and where each value came from.
+memory-ultra-rag-mcp --project-root ~/my-research --print-config
+
+# Change it for one run, for a layer of your own, or for good.
+memory-ultra-rag-mcp --project-root ~/my-research --set retrieval.recency_bonus=0
+memory-ultra-rag-mcp --project-root ~/my-research --config ./memory.toml
+```
+
+A key the registry does not declare is an error in every layer, so a typo is loud
+rather than silent, and a value out of range is refused by name. An empty string is
+a value only where the setting gives it a meaning — `dense.reranker_model = ""`
+turns the cross-encoder off, and an environment variable set to nothing is not a
+layer saying anything, so that one is a file or a `--set`.
+
+A setting is one of three kinds, and the kind says what changing it costs:
+
+| Kind | What it decides | What changes when you do |
+| --- | --- | --- |
+| `identity` | what a memory is made of | the statements are embedded again, rather than compared across two model spaces |
+| `runtime` | where something lives | the cache moves or resizes; a statement is what it was |
+| `retrieval` | what a read admits and in what order | the next answer is ordered differently; the statements do not change |
+
+Two things deliberately stay in code rather than in a file, and `AGENTS.md` says
+why: the record's schema version, and the names and paths that make up a scope,
+because those are what makes two UltraRAG servers agree on where a memory is.
+
 ## Browser view
 
 Memory is worth looking at, so the same memory the tools serve can be read — and, if you want, added to — in a browser on this machine. Two commands do it:
@@ -245,6 +293,9 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 
 | 38 | A rendering is written only when it is asked for, and is not read back | a file the server rewrites whenever the memory changes is a second record in everything but name, and one nobody asked for. So `--export` writes it, the page renders it, and nothing else does. A rendering is stale the moment a statement is recorded, which is what a rendering is, and the honest way to offer one is to say it is generated rather than to keep it silently in step |
 | 39 | A document from an older version is read and then removed, and one this server wrote is left alone | a memory of an earlier version exists as a file, so the file has to be read once for anything the record lacks — and then it is gone, because a scope holding both a document and a database is the state a user recognises as two versions of one thing. A rendering this server wrote is a different case: it was asked for, it is not a record, and `--retire-document` is how it is asked for again |
+
+| 40 | Every tunable is a declared setting, and a `config.toml` is an overlay rather than a replacement | a value written in two places is a value that will differ. So the registry in `settings.py` and the packaged `default.toml` are the two halves of one declaration, a layer may only set a key the registry declares, and every effective value reports the layer that supplied it. The user layer is the one that applies globally, because a memory is shared by every project on the account; the project layer is there for the project that differs |
+| 41 | A setting is declared as `identity`, `runtime`, or `retrieval` | the three cost different things when they change, and a flat list of names does not say that. An `identity` setting is written beside the statements it produced, so changing it means they are embedded again rather than compared across two spaces; a `retrieval` setting reorders the next answer and changes nothing about what is remembered. A config file that cannot say which of the two a number is would let someone set one and expect the other |
 
 ## Develop and test
 

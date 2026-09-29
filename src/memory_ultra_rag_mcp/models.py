@@ -160,14 +160,18 @@ def available_rerankers() -> tuple[str, ...]:
     return tuple(RERANKER_MODELS)
 
 
-def model_cache_directory() -> Path:
+def model_cache_directory(shared: str | Path | None = None) -> Path:
     """Return where this package keeps a fetched model.
 
-    It is this package's own cache, never a sibling server's: a server that
-    depends on another one's state is not independent, and a model is 65 MB that
-    two packages would otherwise each fetch.
+    It is this package's own cache by default, never a sibling server's: a server
+    that depends on another one's state is not independent, and a model is 65 MB
+    that two packages would otherwise each fetch. ``runtime.model_cache_root`` in
+    the settings points several projects on one machine at a single copy instead,
+    which is a choice about disk rather than about what a memory contains.
     """
 
+    if shared:
+        return Path(shared).expanduser()
     return Path(user_cache_path("memory-ultra-rag-mcp", appauthor=False)) / "models"
 
 
@@ -189,7 +193,11 @@ class LocalEmbedder:
     paying for a load in the middle of a lookup.
     """
 
-    def __init__(self, model: str = DEFAULT_EMBEDDING_MODEL) -> None:
+    def __init__(
+        self,
+        model: str = DEFAULT_EMBEDDING_MODEL,
+        cache: Path | None = None,
+    ) -> None:
         spec = EMBEDDING_MODELS.get(model)
         if spec is None:
             raise ModelError(
@@ -197,6 +205,7 @@ class LocalEmbedder:
                 + ", ".join(available_embedders())
             )
         self._spec = spec
+        self._cache = model_cache_directory(cache)
         self._lock = threading.Lock()
         self._runtime: object | None = None
 
@@ -240,7 +249,7 @@ class LocalEmbedder:
             raise ModelError(
                 "the embedding library is not installed; run uv sync --frozen"
             ) from error
-        cache = model_cache_directory()
+        cache = self._cache
         try:
             cache.mkdir(parents=True, exist_ok=True)
             return TextEmbedding(
@@ -281,7 +290,7 @@ class LocalReranker:
     this package may claim a gain it has not measured.
     """
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, cache: Path | None = None) -> None:
         spec = RERANKER_MODELS.get(model)
         if spec is None:
             raise ModelError(
@@ -289,6 +298,7 @@ class LocalReranker:
                 + ", ".join(available_rerankers())
             )
         self._spec = spec
+        self._cache = model_cache_directory(cache)
         self._lock = threading.Lock()
         self._runtime: object | None = None
 
@@ -331,7 +341,7 @@ class LocalReranker:
                 raise ModelError(
                     "the reranking library is not installed; run uv sync --frozen"
                 ) from error
-            cache = model_cache_directory()
+            cache = self._cache
             try:
                 cache.mkdir(parents=True, exist_ok=True)
                 self._runtime = TextCrossEncoder(

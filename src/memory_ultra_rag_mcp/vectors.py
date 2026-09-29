@@ -252,6 +252,24 @@ class VectorStore:
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[: max(int(pool), 1)]
 
+    def knn(self, vector: Sequence[float], limit: int) -> list[tuple[str, float]]:
+        """Return the units nearest this vector, whatever they score.
+
+        `search` decides what a caller is willing to be handed; this decides what
+        is *there*, which is what a near-duplicate check needs: it is looking for
+        the closest thing the memory already holds, and the closest thing may be
+        far below any floor a read would use.
+        """
+
+        connection = self._open()
+        rows = connection.execute(
+            "SELECT unit_key, components FROM vector WHERE model = ? AND dimension = ?",
+            (self.model, self.dimension),
+        ).fetchall()
+        scored = [(str(key), _cosine(vector, _unpack(blob))) for key, blob in rows]
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[: max(int(limit), 1)]
+
 
 def _pack(values: Sequence[float]) -> bytes:
     """Return one vector as 32-bit floats, little-endian."""

@@ -10,6 +10,8 @@ honest, which is what these tests are for.
 
 from __future__ import annotations
 
+import re
+import zlib
 from collections.abc import Sequence
 
 from memory_ultra_rag_mcp.models import ModelError, ModelIdentity
@@ -77,6 +79,40 @@ class FakeEmbedder:
         vector = [0.0] * self._dimension
         vector[axis] = 1.0
         return tuple(vector)
+
+
+#: Above 1 is unreachable for a cosine, so this turns the near-duplicate check
+#: off. The plain fake maps every text that is neither a synonym nor unrelated to
+#: one of three orthogonal units, so two of them are indistinguishable by
+#: similarity and every statement after the first would look like a repetition of
+#: it. A test that is not about that check therefore runs with it off, and a test
+#: that is asks for it by name.
+REPETITION_OFF = {"duplicate_cosine": 2.0}
+
+
+class FakeNearEmbedder(FakeEmbedder):
+    """Vectors built from word overlap, so two wordings of one sentence look alike.
+
+    The plain fake maps text to one of three orthogonal units, which is enough to
+    say "these match" and not enough to say "these are nearly the same" — and a
+    near-duplicate threshold is about the second. This one hashes each word onto an
+    axis, so texts sharing most of their words land close together and unrelated
+    ones stay far apart, which is what that check has to tell apart.
+    """
+
+    def __init__(self, *, model: str = "fake/near", dimension: int = 64) -> None:
+        super().__init__(model=model, dimension=dimension)
+
+    def _vector(self, text: str) -> tuple[float, ...]:
+        vector = [0.0] * self._dimension
+        for word in re.findall(r"\w+", str(text).casefold()):
+            index = zlib.crc32(word.encode("utf-8")) % self._dimension
+            vector[index] += 1.0
+        total = sum(value * value for value in vector) ** 0.5
+        if not total:
+            vector[0] = 1.0
+            return tuple(vector)
+        return tuple(value / total for value in vector)
 
 
 class FakeReranker:

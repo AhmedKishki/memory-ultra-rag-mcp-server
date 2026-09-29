@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeEmbedder, FakeReranker
+from fakes import REPETITION_OFF, FakeEmbedder, FakeNearEmbedder, FakeReranker
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -66,7 +66,9 @@ def _engine(
     model = embedder or FakeEmbedder()
     return Retrieval(
         embedder=model,
-        policy=RetrievalSettings(embedding_model=model.identity.name, **policy),
+        policy=RetrievalSettings(
+            embedding_model=model.identity.name, **{**REPETITION_OFF, **policy}
+        ),
     )
 
 
@@ -205,7 +207,7 @@ def test_forgetting_finds_the_statement_in_whichever_memory_holds_it(
 def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
     config = _config(tmp_path)
     embedder = FakeEmbedder()
-    app = _app(config, embedder)
+    app = _app(config, embedder, duplicate_cosine=0.99)
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
@@ -1246,3 +1248,168 @@ def test_the_scope_argument_names_the_two_destinations_and_no_rule_for_choosing(
         assert marker not in SERVER_INSTRUCTIONS
     assert "most prompts carry no marker" in described
     assert "prompts carry no marker of their own" in SERVER_INSTRUCTIONS
+
+
+def test_a_repetition_of_what_the_memory_already_says_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A memory that answers one question twice is a memory nobody can be sure of.
+
+    Two wordings of one statement are within a hair of each other, and the second
+    is refused: the caller is told which statement it repeats, so it can forget
+    that one and record the new words instead of keeping both.
+    """
+
+    config = _config(tmp_path)
+    app = _app(config, FakeNearEmbedder(), duplicate_cosine=0.99)
+
+    async def scenario() -> tuple[dict[str, Any], list[str]]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "record_memory",
+                {
+                    "content": "always cite the commit that introduced a change",
+                    "kind": "RULE",
+                },
+                raise_on_error=True,
+            )
+            # The first refusal needs no model at all: the words are already there.
+            with pytest.raises(ToolError) as same:
+                await client.call_tool(
+                    "record_memory",
+                    {
+                        "content": "always cite the commit that introduced a change",
+                        "kind": "RULE",
+                    },
+                    raise_on_error=True,
+                )
+            return str(same.value), _statements(config.local_directory)
+
+    message, statements = asyncio.run(scenario())
+    assert "repeats what the memory already says" in message
+    assert "always cite the commit that introduced a change" in message
+    # The refusal says the way out, and the memory is left as it was.
+    assert "Forget that statement" in message
+    assert statements == ["always cite the commit that introduced a change"]
+
+
+def test_a_repetition_worded_differently_is_refused_once_its_vector_exists(
+    tmp_path: Path,
+) -> None:
+    """The meaning side of the check needs the neighbour's vector, which is queued.
+
+    A write does not wait for a vector, so a statement worded differently is caught
+    by meaning as soon as the statement it repeats has been embedded. The refusal is
+    the same one either way, and it names what was already there.
+    """
+
+    from memory_ultra_rag_mcp.models import ModelError
+
+    config = _config(tmp_path)
+    engine = _engine(config, FakeNearEmbedder(), duplicate_cosine=0.99)
+    scope = config.local_directory
+    try:
+        engine.record(
+            directory=scope, content="the archive holds a fixture", kind="NOTE"
+        )
+        engine.worker_for(scope).drain(5.0)
+        with pytest.raises(ModelError) as raised:
+            engine.record(
+                directory=scope, content="the archive holds a fixture.", kind="NOTE"
+            )
+    finally:
+        engine.close()
+
+    message = str(raised.value)
+    assert "repeats what the memory already says" in message
+    assert "the archive holds a fixture" in message
+    assert "1.0000 alike" in message
+    assert _statements(scope) == ["the archive holds a fixture"]
+
+
+def test_the_repetition_threshold_is_a_setting_not_a_rule(tmp_path: Path) -> None:
+    """What counts as a repetition is a number in a config file, and it is read.
+
+    One pair of statements, recorded twice: at the default the second is refused
+    and at a threshold above 1 — unreachable for a cosine, and so how the check is
+    turned off — it is not. The file changes the number and nothing else.
+    """
+
+    from memory_ultra_rag_mcp.models import ModelError
+    from memory_ultra_rag_mcp.settings import resolve_settings
+
+    assert resolve_settings(tmp_path, environ={}).duplicate_cosine == 0.99
+    assert (
+        resolve_settings(
+            tmp_path, environ={}, overrides=["retrieval.duplicate_cosine=0.2"]
+        ).duplicate_cosine
+        == 0.2
+    )
+
+    def record_second(case: str, second: str, duplicate_cosine: float) -> bool:
+        """Record one statement after another, and report whether it was refused.
+
+        Each case gets its own project, because the check is against the memory
+        being written and one left over from an earlier case would refuse this
+        case's first record before it began.
+        """
+
+        (tmp_path / case).mkdir()
+        case_config = _config(tmp_path / case)
+        engine = _engine(
+            case_config, FakeNearEmbedder(), duplicate_cosine=duplicate_cosine
+        )
+        scope = case_config.local_directory
+        try:
+            engine.record(
+                directory=scope, content="the archive holds a fixture", kind="NOTE"
+            )
+            engine.worker_for(scope).drain(5.0)
+            try:
+                engine.record(directory=scope, content=second, kind="NOTE")
+            except ModelError:
+                return True
+            return False
+        finally:
+            engine.close()
+
+    # The same statement worded differently: a repetition at the default, and not
+    # one when the check is off.
+    assert record_second("on", "the archive holds a fixture.", 0.99) is True
+    assert record_second("off", "the archive holds a fixture.", 2.0) is False
+    # A statement that says something else is never a repetition, whatever the
+    # threshold is.
+    assert (
+        record_second("other", "the corpus parser lives in corpus_io.py", 0.99) is False
+    )
+
+
+def test_a_write_is_never_lost_to_a_model_it_cannot_check_with(
+    tmp_path: Path,
+) -> None:
+    """The check is derived work, so a missing model skips it rather than the write."""
+
+    config = _config(tmp_path)
+    embedder = FakeEmbedder()
+    app = _app(config, embedder, duplicate_cosine=0.99)
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "record_memory",
+                {"content": "a fact", "kind": "NOTE"},
+                raise_on_error=True,
+            )
+            embedder.fails = True
+            return _data(
+                await client.call_tool(
+                    "record_memory",
+                    {"content": "another fact", "kind": "NOTE"},
+                    raise_on_error=True,
+                )
+            )
+
+    recorded = asyncio.run(scenario())
+    # The statement lands, and the answer says the repetition was not looked for.
+    assert recorded["duplicate_check"] == "the model is not resident"
+    assert _statements(config.local_directory) == ["another fact", "a fact"]

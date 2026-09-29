@@ -9,15 +9,25 @@ Two roots, one behaviour:
   this account's home data directory and moves with ``--storage-root`` or
   ``MEMORY_ULTRARAG_STORAGE_ROOT`` — or points at UltraRAG's UI storage tree
   through ``ULTRARAG_UI_STORAGE_ROOT``, so a UltraRAG UI shows the same memory.
+
+The two roots are where memory lives, which is a deployment choice a client
+supplies rather than a tunable. Everything else this server reads is a setting,
+and the settings are resolved here too: the packaged defaults, the account's
+``config.toml`` — the layer that applies globally — the project's own, a file
+named on the command line, the environment, and ``--set``, in that order of
+precedence.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from platformdirs import user_data_path
+
+from .settings import EffectiveSettings, SettingsError, resolve_settings
 
 __all__ = [
     "APP_NAME",
@@ -28,6 +38,7 @@ __all__ = [
     "STORAGE_ENV_VAR",
     "ULTRARAG_STORAGE_ENV_VAR",
     "ConfigurationError",
+    "EffectiveSettings",
     "ServerConfig",
     "default_storage_root",
     "global_directory",
@@ -66,12 +77,19 @@ class ConfigurationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
-    """A bound project, the storage root global memory lives under, and its tree."""
+    """A bound project, the storage root global memory lives under, and its tree.
+
+    ``settings`` is the merged result of the layers, and ``settings_provenance``
+    says which layer supplied each value, so ``--print-config`` can show where a
+    number came from rather than only what it is.
+    """
 
     project_root: Path
     local_directory: Path
     storage_root: Path
     global_directory: Path
+    settings: EffectiveSettings | None = None
+    settings_provenance: dict[str, str] | None = None
 
 
 def default_storage_root() -> Path:
@@ -98,13 +116,20 @@ def global_directory(storage_root: Path) -> Path:
 def resolve_config(
     project_root: str | Path,
     storage_root: str | Path | None = None,
+    *,
+    config_path: str | Path | None = None,
+    overrides: Sequence[str] = (),
 ) -> ServerConfig:
-    """Resolve and validate the two roots before any memory is touched.
+    """Resolve the settings and validate the two roots before any memory is touched.
 
     The storage root comes from the argument, then from
     ``MEMORY_ULTRARAG_STORAGE_ROOT``, then from ``ULTRARAG_UI_STORAGE_ROOT``, and
     otherwise from the home data directory. A relative root is resolved against
     the working directory, and an absolute one is used as given.
+
+    The settings are resolved from the same project, so the project's own
+    ``config.toml`` is the layer that applies to it and the account's is the layer
+    that applies everywhere.
     """
     project = Path(project_root).expanduser().resolve()
     if not project.is_dir():
@@ -118,11 +143,20 @@ def resolve_config(
     local.mkdir(parents=True, exist_ok=True)
     storage.mkdir(parents=True, exist_ok=True)
 
+    try:
+        settings = resolve_settings(
+            project, config_path=config_path, overrides=overrides
+        )
+    except SettingsError as error:
+        raise ConfigurationError(str(error)) from error
+
     return ServerConfig(
         project_root=project,
         local_directory=local,
         storage_root=storage,
         global_directory=global_directory(storage),
+        settings=settings,
+        settings_provenance=dict(settings.provenance),
     )
 
 

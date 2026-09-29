@@ -23,14 +23,16 @@ from memory_ultra_rag_mcp.store import SEED, unit_key
 from memory_ultra_rag_mcp.vectors import VectorStore
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fakes import FakeEmbedder
+from fakes import REPETITION_OFF, FakeEmbedder
 
 
 def _engine() -> Retrieval:
     embedder = FakeEmbedder()
     return Retrieval(
         embedder=embedder,
-        policy=RetrievalSettings(embedding_model=embedder.identity.name),
+        policy=RetrievalSettings(
+            embedding_model=embedder.identity.name, **REPETITION_OFF
+        ),
     )
 
 
@@ -474,7 +476,9 @@ def test_a_worker_writes_only_the_scope_it_was_built_for(tmp_path: Path) -> None
     embedder = FakeEmbedder()
     engine = Retrieval(
         embedder=embedder,
-        policy=RetrievalSettings(embedding_model=embedder.identity.name),
+        policy=RetrievalSettings(
+            embedding_model=embedder.identity.name, **REPETITION_OFF
+        ),
     )
     worker = EmbeddingWorker(embedder, first)
     try:

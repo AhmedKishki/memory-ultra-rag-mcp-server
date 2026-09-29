@@ -23,14 +23,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .index import MemoryIndex
 from .maintenance import EmbeddingWorker, embed_pending, warm_models
-from .models import Embedder, ModelError, Reranker
+from .models import DEFAULT_EMBEDDING_MODEL, Embedder, ModelError, Reranker
 from .read import Answer, answer_read, merge_answers
 from .store import HANDOFF_KIND, Statement, StoreError, statement_kind
 from .vectors import VectorStore
+
+if TYPE_CHECKING:
+    from .settings import EffectiveSettings
 
 __all__ = ["Retrieval", "RetrievalSettings"]
 
@@ -66,6 +69,13 @@ class RetrievalSettings:
     #: reproducible from its own scores wants.
     recency_bonus: float = 0.1
 
+    #: How alike two statements may be before the second is refused as a
+    #: repetition of the first. Recording a statement that already means what the
+    #: memory says is how a memory fills with two answers to one question, and a
+    #: caller that is told is one that can forget the first instead. Above 1 is
+    #: unreachable for a cosine, which is how the check is turned off.
+    duplicate_cosine: float = 0.99
+
     #: How many candidates each side contributes before fusion. This is an
     #: internal depth, not the answer: the answer is exactly ``limit`` units, and
     #: every unit is text the caller has to read.
@@ -98,6 +108,31 @@ class RetrievalSettings:
     #: in a loop, about 210 ms for a warm read end to end, and about 1.5 s for
     #: the first reranked read in a process.
     read_ceiling_ms: float = 500.0
+
+    @classmethod
+    def from_settings(cls, settings: EffectiveSettings | None) -> RetrievalSettings:
+        """Return the policy the settings ask for, or the defaults when there are none.
+
+        The settings are the only place these numbers are written down, so a
+        ``config.toml`` naming one of them is the way to change it, and the
+        defaults here are the same numbers the packaged file declares.
+        """
+
+        if settings is None:
+            return cls(embedding_model=DEFAULT_EMBEDDING_MODEL)
+        return cls(
+            embedding_model=settings.embedding_model,
+            cosine_floor=settings.cosine_floor,
+            relative_margin=settings.relative_margin,
+            bm25_weight=settings.bm25_weight,
+            dense_weight=settings.dense_weight,
+            rrf_k=settings.rrf_k,
+            recency_bonus=settings.recency_bonus,
+            duplicate_cosine=settings.duplicate_cosine,
+            pool_depth=settings.pool_depth,
+            reranker_model=settings.reranker_model or None,
+            rerank_depth=settings.rerank_depth,
+        )
 
     def describe(self) -> dict[str, object]:
         """Return this policy, for a diagnostic surface and for a test."""
@@ -193,6 +228,26 @@ class Retrieval:
             label = statement_kind(kind)
         except StoreError as error:
             raise ModelError(str(error)) from error
+        try:
+            repeated = self._repetition(directory, statement)
+        except ModelError:
+            # A memory is never lost because a model is missing, so a write that
+            # cannot be checked is made and says it was not checked. A repetition
+            # that slips in is a worse outcome than an unchecked one, and the
+            # answer is where the caller learns which happened.
+            repeated, unchecked = None, "the model is not resident"
+        else:
+            unchecked = ""
+        if repeated is not None:
+            held, score = repeated
+            raise ModelError(
+                f"this repeats what the memory already says, so it was not "
+                f'recorded: the memory already holds "{held}" and the two are '
+                f"{score:.4f} alike, over the "
+                f"{self.policy.duplicate_cosine} this memory allows. Forget that "
+                "statement and record this one instead, or record something that "
+                "says something the memory does not."
+            )
         with MemoryIndex(directory) as index:
             key, replaced = index.insert(statement, label, replace_kind=replace_kind)
         queued = embed_pending(directory, self.embedder, self.worker_for(directory))
@@ -202,6 +257,7 @@ class Retrieval:
             "text": statement,
             "key": key,
             "replaced": replaced,
+            **({"duplicate_check": unchecked} if unchecked else {}),
             "directory": str(directory),
             "embedding_model": self.policy.embedding_model,
             "units_queued": queued,
@@ -316,6 +372,40 @@ class Retrieval:
         payload["scopes"] = list(directories)
         payload["scope_counts"] = merged.scope_counts
         return payload
+
+    def _repetition(self, directory: Path, statement: str) -> tuple[str, float] | None:
+        """Return the statement this one repeats, and how alike they are.
+
+        Two checks, because a write does not wait for a vector. A statement whose
+        words the record already holds is caught outright, with no model involved,
+        which is also the case a caller is most likely to hit by repeating itself.
+        The rest is by meaning: the nearest vector within the threshold, which
+        catches a statement worded differently and catches it as soon as its
+        neighbour's vector exists.
+
+        Both are against the memory being written, so a project may restate a rule
+        it inherits, and neither refuses a statement for being *about* the same
+        thing — the threshold is near enough that the two differ by wording.
+        """
+
+        threshold = self.policy.duplicate_cosine
+        if threshold > 1.0:
+            return None
+        wanted = " ".join(statement.split())
+        with MemoryIndex(directory) as index:
+            for held in index.statements():
+                if held.normalized == wanted:
+                    return held.text, 1.0
+        identity = self.embedder.identity
+        vector = self.embedder.embed_documents([statement])[0]
+        with VectorStore(directory, identity.name, identity.dimension) as store:
+            nearest = store.knn(vector, 1)
+        if not nearest or nearest[0][1] < threshold:
+            return None
+        key, score = nearest[0]
+        with MemoryIndex(directory) as index:
+            found = index.units_by_key([key]).get(key)
+        return (str(found["text"]), score) if found is not None else None
 
     def forget(
         self,
