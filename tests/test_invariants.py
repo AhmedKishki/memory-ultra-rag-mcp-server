@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fakes import REPETITION_OFF, FakeEmbedder
+from fakes import FakeEmbedder
 from fastmcp import Client
 
 from memory_ultra_rag_mcp import server
@@ -43,9 +43,7 @@ def _engine(config, embedder: FakeEmbedder | None = None, **policy) -> Retrieval
     model = embedder or FakeEmbedder()
     return Retrieval(
         embedder=model,
-        policy=RetrievalSettings(
-            embedding_model=model.identity.name, **{**REPETITION_OFF, **policy}
-        ),
+        policy=RetrievalSettings(embedding_model=model.identity.name, **policy),
     )
 
 

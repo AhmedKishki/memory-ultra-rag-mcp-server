@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import REPETITION_OFF, FakeEmbedder, FakeNearEmbedder, FakeReranker
+from fakes import FakeEmbedder, FakeNearEmbedder, FakeReranker
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -66,9 +66,7 @@ def _engine(
     model = embedder or FakeEmbedder()
     return Retrieval(
         embedder=model,
-        policy=RetrievalSettings(
-            embedding_model=model.identity.name, **{**REPETITION_OFF, **policy}
-        ),
+        policy=RetrievalSettings(embedding_model=model.identity.name, **policy),
     )
 
 
@@ -146,8 +144,8 @@ def test_a_recall_searches_both_memories_and_ranks_them_together(
     """One question is one answer, and each statement says where it came from."""
 
     config = _config(tmp_path)
-    engine = _engine(config, FakeEmbedder())
-    app = _app(config, FakeEmbedder())
+    engine = _engine(config, FakeNearEmbedder())
+    app = _app(config, FakeNearEmbedder())
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
@@ -414,7 +412,7 @@ def test_a_read_says_so_when_the_model_is_not_resident(tmp_path: Path) -> None:
 
 def test_a_read_is_capped_and_says_so(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    embedder = FakeEmbedder()
+    embedder = FakeNearEmbedder()
     engine = _engine(config, embedder)
     app = server.create_server(config, retrieval=engine, warm=False)
 
@@ -782,14 +780,17 @@ def test_a_reranker_orders_the_answer_when_it_is_switched_on(tmp_path: Path) -> 
     """On by default, and when it runs it decides the order it reports."""
 
     config = _config(tmp_path)
-    embedder = FakeEmbedder()
+    embedder = FakeNearEmbedder()
     engine = _engine(config, embedder, reranker_model="fake/reranker")
     engine.reranker = FakeReranker()  # type: ignore[assignment] - the seam itself, on a fake
     app = server.create_server(config, retrieval=engine, warm=False)
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
-            for line in ("the draft is a plan", "the draft lives in docs"):
+            for line in (
+                "the draft is a plan, and the plan is not a promise",
+                "the draft lives beside the sources it was written from",
+            ):
                 await client.call_tool(
                     "record_memory", {"content": line, "kind": "NOTE"}
                 )
@@ -803,8 +804,8 @@ def test_a_reranker_orders_the_answer_when_it_is_switched_on(tmp_path: Path) -> 
     # The words match both statements, and the reranker's scores put the one
     # holding more of the query first. Ordering only: both still come back.
     assert [unit["text"] for unit in read["units"]] == [
-        "the draft lives in docs",
-        "the draft is a plan",
+        "the draft lives beside the sources it was written from",
+        "the draft is a plan, and the plan is not a promise",
     ]
 
 
@@ -888,7 +889,7 @@ def test_a_handoff_is_the_newest_statement_and_is_recallable(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    app = _app(config, FakeEmbedder())
+    app = _app(config, FakeNearEmbedder())
 
     async def scenario() -> dict[str, Any]:
         async with Client(app) as client:
@@ -1064,17 +1065,21 @@ def test_the_newest_statement_is_answered_before_an_older_equal_one(
     """The preference is for what is new, and it is a number rather than a rule."""
 
     config = _config(tmp_path)
-    app = _app(config, FakeEmbedder())
+    app = _app(config, FakeNearEmbedder())
 
     async def scenario() -> list[dict[str, Any]]:
         async with Client(app) as client:
-            for index in range(6):
+            for content in (
+                "the corpus parser rejects a field it does not know",
+                "the corpus parser keeps its own scratch cache",
+                "the corpus parser reads the manifest before the text",
+                "the corpus parser refuses a directory it was given",
+                "the corpus parser normalises the whitespace it finds",
+                "the corpus parser reports the revision it was built from",
+            ):
                 await client.call_tool(
                     "record_memory",
-                    {
-                        "content": f"the corpus parser note {index} lives here",
-                        "kind": "NOTE",
-                    },
+                    {"content": content, "kind": "NOTE"},
                     raise_on_error=True,
                 )
             return _data(
@@ -1087,9 +1092,10 @@ def test_the_newest_statement_is_answered_before_an_older_equal_one(
     assert len(units) > 1
     # The newest is in the answer, which is what the preference is for: it is
     # never dropped for being new, only never allowed to bury a better match.
-    assert any("note 5" in unit["text"] for unit in units)
+    newest = "the corpus parser reports the revision it was built from"
+    assert any(newest in unit["text"] for unit in units)
     dates = {unit["text"]: unit["added_at"] for unit in units}
-    assert dates["the corpus parser note 5 lives here"] == max(dates.values())
+    assert dates[newest] == max(dates.values())
 
 
 def test_the_recency_bonus_decays_and_is_never_a_worse_match(tmp_path: Path) -> None:
@@ -1154,17 +1160,21 @@ def test_a_zero_recency_bonus_answers_on_the_match_alone(tmp_path: Path) -> None
     """Turning the preference off is a configuration, and it is honoured."""
 
     config = _config(tmp_path)
-    app = _app(config, FakeEmbedder(), recency_bonus=0.0)
+    app = _app(config, FakeNearEmbedder(), recency_bonus=0.0)
 
     async def scenario() -> list[dict[str, Any]]:
         async with Client(app) as client:
-            for index in range(6):
+            for content in (
+                "the corpus parser lives in a.py, not in docs/",
+                "the corpus parser refuses a path that is a directory",
+                "the corpus parser reports the line it stopped on",
+                "the corpus parser reads the extension to choose a reader",
+                "the corpus parser keeps a copy of what it rejected",
+                "the corpus parser counts the pages it could not open",
+            ):
                 await client.call_tool(
                     "record_memory",
-                    {
-                        "content": f"the corpus parser note {index} lives in a.py",
-                        "kind": "NOTE",
-                    },
+                    {"content": content, "kind": "NOTE"},
                     raise_on_error=True,
                 )
             return _data(
@@ -1250,20 +1260,19 @@ def test_the_scope_argument_names_the_two_destinations_and_no_rule_for_choosing(
     assert "prompts carry no marker of their own" in SERVER_INSTRUCTIONS
 
 
-def test_a_repetition_of_what_the_memory_already_says_is_refused(
-    tmp_path: Path,
-) -> None:
+def test_a_repetition_is_recorded_and_the_read_shows_it_once(tmp_path: Path) -> None:
     """A memory that answers one question twice is a memory nobody can be sure of.
 
-    Two wordings of one statement are within a hair of each other, and the second
-    is refused: the caller is told which statement it repeats, so it can forget
-    that one and record the new words instead of keeping both.
+    A write is not refused for being similar to what is already there: it does not
+    wait for a vector, so the same statement would be judged differently depending
+    on what had been embedded. The repetition is settled where the whole answer is
+    in hand, and the caller is told what was collapsed.
     """
 
     config = _config(tmp_path)
     app = _app(config, FakeNearEmbedder(), duplicate_cosine=0.99)
 
-    async def scenario() -> tuple[dict[str, Any], list[str]]:
+    async def scenario() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
         async with Client(app) as client:
             await client.call_tool(
                 "record_memory",
@@ -1273,37 +1282,49 @@ def test_a_repetition_of_what_the_memory_already_says_is_refused(
                 },
                 raise_on_error=True,
             )
-            # The first refusal needs no model at all: the words are already there.
-            with pytest.raises(ToolError) as same:
+            # Two kinds, so two statements with the same words: the words
+            # alone cannot see that one statement was filed twice.
+            repeated = _data(
                 await client.call_tool(
                     "record_memory",
                     {
                         "content": "always cite the commit that introduced a change",
-                        "kind": "RULE",
+                        "kind": "PLAN",
                     },
                     raise_on_error=True,
                 )
-            return str(same.value), _statements(config.local_directory)
+            )
+            answered = _data(
+                await client.call_tool(
+                    "recall_memory", {"query": "citing the commit"}, raise_on_error=True
+                )
+            )
+            return repeated, _statements(config.local_directory), answered
 
-    message, statements = asyncio.run(scenario())
-    assert "repeats what the memory already says" in message
-    assert "always cite the commit that introduced a change" in message
-    # The refusal says the way out, and the memory is left as it was.
-    assert "Forget that statement" in message
-    assert statements == ["always cite the commit that introduced a change"]
+    repeated, statements, answered = asyncio.run(scenario())
+
+    # Both statements are in the record: a memory is not lost to a refusal.
+    assert repeated["status"] == "recorded"
+    assert len(statements) == 2
+    # And a read shows one of them, and says the other said the same thing.
+    assert answered["returned"] == 1
+    assert answered["units"][0]["text"] == (
+        "always cite the commit that introduced a change"
+    )
+    collapsed = answered["collapsed_repetitions"]
+    assert len(collapsed) == 1
+    assert collapsed[0]["collapsed_by"] == "same words"
 
 
-def test_a_repetition_worded_differently_is_refused_once_its_vector_exists(
+def test_a_repetition_in_other_words_is_collapsed_once_both_have_vectors(
     tmp_path: Path,
 ) -> None:
-    """The meaning side of the check needs the neighbour's vector, which is queued.
+    """The meaning side sees a statement worded differently, and only on a read.
 
-    A write does not wait for a vector, so a statement worded differently is caught
-    by meaning as soon as the statement it repeats has been embedded. The refusal is
-    the same one either way, and it names what was already there.
+    The words cannot see it, so the cosine does — which means it can only do so
+    once both statements have a vector, and that is the read's business rather
+    than the write's.
     """
-
-    from memory_ultra_rag_mcp.models import ModelError
 
     config = _config(tmp_path)
     engine = _engine(config, FakeNearEmbedder(), duplicate_cosine=0.99)
@@ -1313,31 +1334,43 @@ def test_a_repetition_worded_differently_is_refused_once_its_vector_exists(
             directory=scope, content="the archive holds a fixture", kind="NOTE"
         )
         engine.worker_for(scope).drain(5.0)
-        with pytest.raises(ModelError) as raised:
-            engine.record(
-                directory=scope, content="the archive holds a fixture.", kind="NOTE"
-            )
+        engine.record(
+            directory=scope, content="the archive holds a fixture.", kind="NOTE"
+        )
+        engine.worker_for(scope).drain(5.0)
+        answered = engine.answer_both(
+            directories={"local": scope},
+            query="archive fixture",
+            limit=10,
+        )
     finally:
         engine.close()
 
-    message = str(raised.value)
-    assert "repeats what the memory already says" in message
-    assert "the archive holds a fixture" in message
-    assert "1.0000 alike" in message
-    assert _statements(scope) == ["the archive holds a fixture"]
+    assert _statements(scope) == [
+        "the archive holds a fixture.",
+        "the archive holds a fixture",
+    ]
+    assert answered["returned"] == 1
+    collapsed = answered["collapsed_repetitions"]
+    assert len(collapsed) == 1
+    assert collapsed[0]["collapsed_by"] == "same meaning"
+    assert collapsed[0]["similarity"] >= 0.99
 
 
-def test_the_repetition_threshold_is_a_setting_not_a_rule(tmp_path: Path) -> None:
+def test_the_repetition_threshold_is_a_setting_and_the_words_are_not(
+    tmp_path: Path,
+) -> None:
     """What counts as a repetition is a number in a config file, and it is read.
 
-    One pair of statements, recorded twice: at the default the second is refused
-    and at a threshold above 1 — unreachable for a cosine, and so how the check is
-    turned off — it is not. The file changes the number and nothing else.
+    Three pairs at four thresholds. Words that are the same words are a repetition
+    whatever the number, because no number is a claim about words; a number decides
+    only the part cosine decides. And a number no cosine can reach does not switch
+    anything off — it decides that nothing is close enough, which is a different
+    answer from not looking.
     """
 
     from config_ultra_rag_mcp import resolve_settings
 
-    from memory_ultra_rag_mcp.models import ModelError
     from memory_ultra_rag_mcp.settings import SETTINGS, sources_for
 
     def resolved(**kwargs) -> float:
@@ -1349,12 +1382,13 @@ def test_the_repetition_threshold_is_a_setting_not_a_rule(tmp_path: Path) -> Non
     assert resolved() == 0.99
     assert resolved(overrides=["retrieval.duplicate_cosine=0.2"]) == 0.2
 
-    def record_second(case: str, second: str, duplicate_cosine: float) -> bool:
-        """Record one statement after another, and report whether it was refused.
+    def collapse_at(
+        case: str, second: str, second_kind: str, duplicate_cosine: float
+    ) -> tuple[int, list[str]]:
+        """Record two statements, read them back, and report what came back.
 
-        Each case gets its own project, because the check is against the memory
-        being written and one left over from an earlier case would refuse this
-        case's first record before it began.
+        Each case gets its own project, because a memory left over from an earlier
+        case would be collapsed into this one.
         """
 
         (tmp_path / case).mkdir()
@@ -1368,29 +1402,80 @@ def test_the_repetition_threshold_is_a_setting_not_a_rule(tmp_path: Path) -> Non
                 directory=scope, content="the archive holds a fixture", kind="NOTE"
             )
             engine.worker_for(scope).drain(5.0)
-            try:
-                engine.record(directory=scope, content=second, kind="NOTE")
-            except ModelError:
-                return True
-            return False
+            engine.record(directory=scope, content=second, kind=second_kind)
+            engine.worker_for(scope).drain(5.0)
+            answered = engine.answer_both(
+                directories={"local": scope}, query="archive", limit=10
+            )
+            return answered["returned"], [
+                str(item["collapsed_by"])
+                for item in answered.get("collapsed_repetitions", [])
+            ]
         finally:
             engine.close()
 
-    # The same statement worded differently: a repetition at the default, and not
-    # one when the check is off.
-    assert record_second("on", "the archive holds a fixture.", 0.99) is True
-    assert record_second("off", "the archive holds a fixture.", 2.0) is False
-    # A statement that says something else is never a repetition, whatever the
-    # threshold is.
-    assert (
-        record_second("other", "the corpus parser lives in corpus_io.py", 0.99) is False
+    first = "the archive holds a fixture"
+    # The same words under a second kind: two statements, one thing said, and no
+    # threshold reaches it.
+    for case, threshold in (
+        ("words-strict", 0.99),
+        ("words-loose", 0.2),
+        ("words-off", 2.0),
+    ):
+        assert collapse_at(case, first, "PLAN", threshold) == (1, ["same words"]), case
+    # One statement and a longer one that says almost the same thing: the number
+    # decides it, and both directions of the number are exercised.
+    assert collapse_at("near", f"{first} and a manifest", "NOTE", 0.8) == (
+        1,
+        ["same meaning"],
     )
+    assert collapse_at("apart", f"{first} and a manifest", "NOTE", 0.99) == (2, [])
+    # A statement that says something else is never a repetition.
+    assert collapse_at(
+        "other", "the archive parser lives in corpus_io.py", "NOTE", 0.99
+    ) == (2, [])
 
 
-def test_a_write_is_never_lost_to_a_model_it_cannot_check_with(
-    tmp_path: Path,
-) -> None:
-    """The check is derived work, so a missing model skips it rather than the write."""
+def test_a_repetition_filed_in_both_memories_is_shown_once(tmp_path: Path) -> None:
+    """The case a per-scope check cannot see: one statement, filed twice.
+
+    It is the same statement, so a caller told it twice is told the same thing
+    about the same question, and the copy that matched best is the one it is shown.
+    """
+
+    config = _config(tmp_path)
+    app = _app(config, FakeNearEmbedder(), duplicate_cosine=0.99)
+    both = "the draft lives in docs/"
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            for scope in ("local", "global"):
+                await client.call_tool(
+                    "record_memory",
+                    {"content": both, "kind": "NOTE", "scope": scope},
+                    raise_on_error=True,
+                )
+            return _data(
+                await client.call_tool(
+                    "recall_memory", {"query": "the draft"}, raise_on_error=True
+                )
+            )
+
+    answered = asyncio.run(scenario())
+
+    assert answered["scope_counts"] == {"local": 1, "global": 1}
+    assert answered["returned"] == 1
+    assert [unit["scope"] for unit in answered["units"]] == ["local"]
+    assert answered["collapsed_repetitions"][0]["scope"] == "global"
+
+
+def test_a_write_is_never_lost_to_a_model_it_cannot_use(tmp_path: Path) -> None:
+    """A write consults no model, so a model that cannot be fetched cannot stop it.
+
+    The statement lands, and the read that follows says the meaning side was not
+    available — which is the whole of what a caller needs to know, because nothing
+    about the write depended on it.
+    """
 
     config = _config(tmp_path)
     embedder = FakeEmbedder()
@@ -1404,15 +1489,22 @@ def test_a_write_is_never_lost_to_a_model_it_cannot_check_with(
                 raise_on_error=True,
             )
             embedder.fails = True
-            return _data(
+            recorded = _data(
                 await client.call_tool(
                     "record_memory",
                     {"content": "another fact", "kind": "NOTE"},
                     raise_on_error=True,
                 )
             )
+            answered = _data(
+                await client.call_tool(
+                    "recall_memory", {"query": "fact"}, raise_on_error=True
+                )
+            )
+            return {**recorded, "answer": answered}
 
     recorded = asyncio.run(scenario())
-    # The statement lands, and the answer says the repetition was not looked for.
-    assert recorded["duplicate_check"] == "the model is not resident"
+
+    assert "duplicate_check" not in recorded
     assert _statements(config.local_directory) == ["another fact", "a fact"]
+    assert recorded["answer"]["semantic_available"] is False

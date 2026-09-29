@@ -128,6 +128,8 @@ memory-ultra-rag-mcp --project-root ~/my-research --set retrieval.recency_bonus=
 memory-ultra-rag-mcp --project-root ~/my-research --config ./memory.toml
 ```
 
+A recall never shows the same statement twice. One filed in both memories, or two worded differently, is collapsed to the best-ranked of the pair and reported in `collapsed_repetitions`; `retrieval.duplicate_cosine` decides how alike two wordings have to be before they are the same statement, and no setting turns the check off.
+
 A key the registry does not declare is an error in every layer, so a typo is loud
 rather than silent, and a value out of range is refused by name. An empty string is
 a value only where the setting gives it a meaning — `dense.reranker_model = ""`
@@ -305,6 +307,7 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 
 | 41 | A setting is declared as `identity`, `runtime`, or `retrieval` | the three cost different things when they change, and a flat list of names does not say that. An `identity` setting is written beside the statements it produced, so changing it means they are embedded again rather than compared across two spaces; a `retrieval` setting reorders the next answer and changes nothing about what is remembered. A config file that cannot say which of the two a number is would let someone set one and expect the other |
 | 42 | The layer stack is a pinned library rather than a second copy in this package | two servers in this collection were carrying the same nine functions, and the first copy refused the environment and `--set` layers because its coercion accepted only the types a TOML file produces. The stack is the same problem solved once: the registry, the merge, the coercion, the provenance, and the path helpers are shared behind a pinned commit, while the keys, the packaged `default.toml`, the environment names, and the two directory names stay here. Skew between this server's pin and the other server's is allowed, because a floating or vendored dependency is what would make one server's release depend on another's |
+| 43 | A repetition is collapsed in the answer, and a write is never refused for it | a write does not wait for a vector, so deciding on a write decides with whatever has been embedded so far: the same statement would be refused once and accepted the next time, and a caller who cannot record is a caller with no memory. The read is where the whole answer is in hand, so that is where it is decided — the words first, which cost nothing, then the cosine within `retrieval.duplicate_cosine` for the statement that says the same thing in other words. The best-ranked of a repeated pair is the one shown, and `collapsed_repetitions` says what went and which test caught it, so an answer is never quietly short. What is given up: a memory may hold the same statement twice, and only a read reveals it |
 
 ## Develop and test
 

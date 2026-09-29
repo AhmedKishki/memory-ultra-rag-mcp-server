@@ -81,15 +81,6 @@ class FakeEmbedder:
         return tuple(vector)
 
 
-#: Above 1 is unreachable for a cosine, so this turns the near-duplicate check
-#: off. The plain fake maps every text that is neither a synonym nor unrelated to
-#: one of three orthogonal units, so two of them are indistinguishable by
-#: similarity and every statement after the first would look like a repetition of
-#: it. A test that is not about that check therefore runs with it off, and a test
-#: that is asks for it by name.
-REPETITION_OFF = {"duplicate_cosine": 2.0}
-
-
 class FakeNearEmbedder(FakeEmbedder):
     """Vectors built from word overlap, so two wordings of one sentence look alike.
 

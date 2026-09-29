@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from .index import MemoryIndex
 from .models import Embedder, ModelError, Reranker
-from .vectors import VectorStore
+from .vectors import VectorStore, cosine_similarity
 
 if TYPE_CHECKING:
     # A type only: retrieval.py owns the object that calls in here, so importing
@@ -66,6 +66,15 @@ class Answer:
     scope_counts: dict[str, int] | None = None
     hint: str | None = None
     elapsed_ms: float = 0.0
+    #: The record's own key and vector for each unit, in the same order as
+    #: `units`. A recall that collapses a repetition has to compare statements it
+    #: did not fetch for this read, so the two travel with the answer rather than
+    #: being looked up again; neither is part of what the caller is told.
+    unit_keys: list[str] = field(default_factory=list)
+    unit_vectors: list[tuple[float, ...]] = field(default_factory=list)
+    #: What the read collapsed, and by which test, so a caller that is told three
+    #: statements came back knows two of them said the same thing.
+    collapsed: list[dict[str, Any]] = field(default_factory=list)
 
     def payload(self) -> dict[str, Any]:
         """Return the object a read answers with."""
@@ -84,15 +93,91 @@ class Answer:
         }
         if self.superseded_removed:
             answer["superseded_removed"] = self.superseded_removed
+        if self.collapsed:
+            answer["collapsed_repetitions"] = self.collapsed
         if self.hint is not None:
             answer["hint"] = self.hint
         return answer
+
+
+def _normalized(text: str) -> str:
+    """Return the words of a statement, so two wordings of it read the same."""
+
+    return " ".join(str(text or "").split())
+
+
+def collapse_repetitions(
+    ranked: list[tuple[float, int, str, str, tuple[float, ...] | None, dict[str, Any]]],
+    *,
+    threshold: float,
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return the answer's statements with near-repeats of them removed.
+
+    Two tests, in that order, and both over the answer's own candidates rather than
+    over the memory. Words first, because a statement the record already holds
+    word for word needs no model and no vector to recognise, and it is the case a
+    caller is most likely to produce. Cosine second, for the statement that says
+    the same thing in other words, which is the one words cannot see.
+
+    A survivor is compared only against survivors, so the first — and therefore
+    the best-ranked — statement of a repeated pair is the one kept, and the rest
+    are dropped rather than shown beside it. The work is the number of statements
+    the answer holds, which is the caller's `limit` and not the size of the memory,
+    so a large memory costs no more to read than a small one.
+
+    The dropped statements are returned as well, because a read that quietly
+    returned three of five matches is a read the caller cannot account for.
+    """
+
+    kept: list[dict[str, Any]] = []
+    kept_text: list[str] = []
+    kept_vectors: list[tuple[float, ...]] = []
+    collapsed: list[dict[str, Any]] = []
+    for _score, _stamp, _key, text, vector, stated in ranked:
+        normalized = _normalized(text)
+        if any(normalized == held for held in kept_text):
+            collapsed.append({**stated, "collapsed_by": "same words"})
+            continue
+        if vector is not None:
+            score = _nearest(vector, kept_vectors, threshold)
+            if score is not None:
+                collapsed.append(
+                    {**stated, "collapsed_by": "same meaning", "similarity": score}
+                )
+                continue
+        if len(kept) >= max(int(limit), 1):
+            break
+        kept.append(stated)
+        kept_text.append(normalized)
+        if vector is not None:
+            kept_vectors.append(vector)
+    return kept, collapsed
+
+
+def _nearest(
+    vector: tuple[float, ...],
+    others: list[tuple[float, ...]],
+    threshold: float,
+) -> float | None:
+    """Return how alike this vector is to the closest of the others, if close enough."""
+
+    best: float | None = None
+    length = len(vector)
+    for other in others:
+        if len(other) != length:
+            continue
+        score = cosine_similarity(vector, other)
+        if best is None or score > best:
+            best = score
+    return best if best is not None and best >= threshold else None
 
 
 def merge_answers(
     answers: list[Answer],
     *,
     limit: int,
+    duplicate_cosine: float = 0.99,
 ) -> Answer:
     """Combine one answer per scope into a single ranked answer.
 
@@ -104,21 +189,44 @@ def merge_answers(
     The counts are reported per scope because a caller quoting a statement has to
     say which memory it came from, and that is a fact about the answer rather than
     something to work out afterwards.
+
+    A repetition is collapsed here and not inside either scope's read, because the
+    case that matters is one statement filed in both memories: it is one statement,
+    and a caller told it twice is told the same thing about the same question. The
+    best-ranked of a repeated pair is the one that survives, so the copy that
+    matched best is the one the caller is shown.
     """
 
     started = time.perf_counter()
     combined = Answer(scope="both", query=answers[0].query if answers else "")
-    ranked: list[tuple[float, int, dict[str, Any]]] = []
+    ranked: list[
+        tuple[float, int, str, str, tuple[float, ...] | None, dict[str, Any]]
+    ] = []
     for answer in answers:
-        for unit in answer.units:
+        vectors = dict(zip(answer.unit_keys, answer.unit_vectors, strict=False))
+        for position, unit in enumerate(answer.units):
             # Every statement names the memory it came from: a caller quoting one
             # has to say which, and that is a fact about the answer.
             stated = {"scope": answer.scope, **unit}
+            key = answer.unit_keys[position] if position < len(answer.unit_keys) else ""
             ranked.append(
-                (float(unit.get("score") or 0.0), int(unit.get("stamp") or 0), stated)
+                (
+                    float(unit.get("score") or 0.0),
+                    int(unit.get("stamp") or 0),
+                    key,
+                    str(unit.get("text") or ""),
+                    vectors.get(key),
+                    stated,
+                )
             )
     ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
-    combined.units = [unit for _score, _stamp, unit in ranked[: max(int(limit), 1)]]
+    kept, collapsed = collapse_repetitions(
+        ranked,
+        threshold=float(duplicate_cosine),
+        limit=max(int(limit), 1) + len(answers),
+    )
+    combined.units = kept[: max(int(limit), 1)]
+    combined.collapsed = collapsed
     combined.scope_counts = {answer.scope: len(answer.units) for answer in answers}
     combined.truncated = any(answer.truncated for answer in answers) or (
         len(ranked) > max(int(limit), 1)
@@ -387,6 +495,16 @@ def answer_read(
             for key, score, side, _both in ordered
             if key in units_by_key
         ]
+        answer.unit_keys = [
+            key for key, _score, _side, _both in ordered if key in units_by_key
+        ]
+        # The vectors of the statements this read is holding, so a recall that
+        # merges two memories can compare a statement from one against a statement
+        # from the other without a second read.
+        if answer.unit_keys:
+            with VectorStore(directory, identity.name, identity.dimension) as store:
+                held = store.vectors_for(answer.unit_keys)
+            answer.unit_vectors = [held.get(key, ()) for key in answer.unit_keys]
         if semantic and not lexical:
             answer.matched_by = "semantic"
         elif lexical and semantic:

@@ -30,6 +30,7 @@ from .store import unit_key
 
 __all__ = [
     "VectorStore",
+    "cosine_similarity",
     "unit_key",
 ]
 
@@ -216,6 +217,33 @@ class VectorStore:
         connection.commit()
         return dropped
 
+    def vectors_for(self, keys: Sequence[str]) -> dict[str, tuple[float, ...]]:
+        """Return the named units' vectors, and nothing for a unit that has none.
+
+        One query for the whole set rather than one per key, because a read that
+        has to collapse a repetition needs every candidate it is holding and not
+        a round trip each. A unit whose vector has not been produced yet is simply
+        absent, so the caller has one fewer comparison to make rather than a
+        failure to handle.
+        """
+
+        wanted = list(dict.fromkeys(str(key) for key in keys))
+        if not wanted:
+            return {}
+        connection = self._open()
+        found: dict[str, tuple[float, ...]] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = connection.execute(
+                "SELECT unit_key, components FROM vector "
+                f"WHERE model = ? AND dimension = ? AND unit_key IN ({placeholders})",
+                (self.model, self.dimension, *chunk),
+            ).fetchall()
+            for key, blob in rows:
+                found[str(key)] = _unpack(blob)
+        return found
+
     def search(
         self,
         query_vector: Sequence[float],
@@ -242,7 +270,8 @@ class VectorStore:
             return []
 
         scored = [
-            (str(key), _cosine(query_vector, _unpack(blob))) for key, blob in rows
+            (str(key), cosine_similarity(query_vector, _unpack(blob)))
+            for key, blob in rows
         ]
         best = max(score for _, score in scored)
         if best < floor:
@@ -266,7 +295,9 @@ class VectorStore:
             "SELECT unit_key, components FROM vector WHERE model = ? AND dimension = ?",
             (self.model, self.dimension),
         ).fetchall()
-        scored = [(str(key), _cosine(vector, _unpack(blob))) for key, blob in rows]
+        scored = [
+            (str(key), cosine_similarity(vector, _unpack(blob))) for key, blob in rows
+        ]
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[: max(int(limit), 1)]
 
@@ -292,7 +323,7 @@ def _unpack(blob: bytes) -> tuple[float, ...]:
     return tuple(packed)
 
 
-def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
+def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     """Return the cosine of two vectors that are each already at unit length."""
 
     if len(left) != len(right):

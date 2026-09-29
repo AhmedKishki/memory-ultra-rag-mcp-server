@@ -69,11 +69,13 @@ class RetrievalSettings:
     #: reproducible from its own scores wants.
     recency_bonus: float = 0.1
 
-    #: How alike two statements may be before the second is refused as a
-    #: repetition of the first. Recording a statement that already means what the
-    #: memory says is how a memory fills with two answers to one question, and a
-    #: caller that is told is one that can forget the first instead. Above 1 is
-    #: unreachable for a cosine, which is how the check is turned off.
+    #: How alike two statements must be before a read treats them as one thing and
+    #: shows only the better-ranked of them. Two statements of different words can
+    #: still be one statement, and a memory that answers a question twice is a
+    #: memory nobody can be sure of. This number decides that part only: words that
+    #: are the same words are one statement whatever it says, and a number no
+    #: cosine can reach decides that nothing is close enough rather than turning
+    #: the check off.
     duplicate_cosine: float = 0.99
 
     #: How many candidates each side contributes before fusion. This is an
@@ -219,6 +221,14 @@ class Retrieval:
         the top of the document, and the time it was recorded. The document is
         then written out from the record, because a memory nobody can open is not
         one anybody can check.
+
+        Nothing is refused for being similar to what is already here. A memory that
+        refuses a write is a memory a caller cannot write to, and deciding that on
+        a write means deciding it with whatever the vectors happen to say that
+        moment — a write does not wait for a vector, so the same statement would be
+        judged differently depending on what had been embedded. The repetition is
+        resolved where it can be judged on the whole answer instead, in the read,
+        and there it collapses rather than refuses.
         """
 
         statement = str(content or "").strip()
@@ -228,26 +238,6 @@ class Retrieval:
             label = statement_kind(kind)
         except StoreError as error:
             raise ModelError(str(error)) from error
-        try:
-            repeated = self._repetition(directory, statement)
-        except ModelError:
-            # A memory is never lost because a model is missing, so a write that
-            # cannot be checked is made and says it was not checked. A repetition
-            # that slips in is a worse outcome than an unchecked one, and the
-            # answer is where the caller learns which happened.
-            repeated, unchecked = None, "the model is not resident"
-        else:
-            unchecked = ""
-        if repeated is not None:
-            held, score = repeated
-            raise ModelError(
-                f"this repeats what the memory already says, so it was not "
-                f'recorded: the memory already holds "{held}" and the two are '
-                f"{score:.4f} alike, over the "
-                f"{self.policy.duplicate_cosine} this memory allows. Forget that "
-                "statement and record this one instead, or record something that "
-                "says something the memory does not."
-            )
         with MemoryIndex(directory) as index:
             key, replaced = index.insert(statement, label, replace_kind=replace_kind)
         queued = embed_pending(directory, self.embedder, self.worker_for(directory))
@@ -257,7 +247,6 @@ class Retrieval:
             "text": statement,
             "key": key,
             "replaced": replaced,
-            **({"duplicate_check": unchecked} if unchecked else {}),
             "directory": str(directory),
             "embedding_model": self.policy.embedding_model,
             "units_queued": queued,
@@ -366,46 +355,16 @@ class Retrieval:
             )
             for scope, directory in directories.items()
         ]
-        merged = merge_answers(answers, limit=limit)
+        merged = merge_answers(
+            answers,
+            limit=limit,
+            duplicate_cosine=self.policy.duplicate_cosine,
+        )
         payload = merged.payload()
         payload.pop("scope", None)
         payload["scopes"] = list(directories)
         payload["scope_counts"] = merged.scope_counts
         return payload
-
-    def _repetition(self, directory: Path, statement: str) -> tuple[str, float] | None:
-        """Return the statement this one repeats, and how alike they are.
-
-        Two checks, because a write does not wait for a vector. A statement whose
-        words the record already holds is caught outright, with no model involved,
-        which is also the case a caller is most likely to hit by repeating itself.
-        The rest is by meaning: the nearest vector within the threshold, which
-        catches a statement worded differently and catches it as soon as its
-        neighbour's vector exists.
-
-        Both are against the memory being written, so a project may restate a rule
-        it inherits, and neither refuses a statement for being *about* the same
-        thing — the threshold is near enough that the two differ by wording.
-        """
-
-        threshold = self.policy.duplicate_cosine
-        if threshold > 1.0:
-            return None
-        wanted = " ".join(statement.split())
-        with MemoryIndex(directory) as index:
-            for held in index.statements():
-                if held.normalized == wanted:
-                    return held.text, 1.0
-        identity = self.embedder.identity
-        vector = self.embedder.embed_documents([statement])[0]
-        with VectorStore(directory, identity.name, identity.dimension) as store:
-            nearest = store.knn(vector, 1)
-        if not nearest or nearest[0][1] < threshold:
-            return None
-        key, score = nearest[0]
-        with MemoryIndex(directory) as index:
-            found = index.units_by_key([key]).get(key)
-        return (str(found["text"]), score) if found is not None else None
 
     def forget(
         self,
