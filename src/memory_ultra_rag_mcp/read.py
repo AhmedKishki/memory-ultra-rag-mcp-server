@@ -62,7 +62,7 @@ class Answer:
     units_pending: int = 0
     truncated: bool = False
     reranked: bool = False
-    document_rewritten: bool = False
+    superseded_removed: list[str] = field(default_factory=list)
     scope_counts: dict[str, int] | None = None
     hint: str | None = None
     elapsed_ms: float = 0.0
@@ -79,10 +79,11 @@ class Answer:
             "truncated": self.truncated,
             "semantic_available": self.semantic_available,
             "units_pending": self.units_pending,
-            "document_rewritten": self.document_rewritten,
             "reranked": self.reranked,
             "elapsed_ms": round(self.elapsed_ms, 2),
         }
+        if self.superseded_removed:
+            answer["superseded_removed"] = self.superseded_removed
         if self.hint is not None:
             answer["hint"] = self.hint
         return answer
@@ -123,7 +124,9 @@ def merge_answers(
         len(ranked) > max(int(limit), 1)
     )
     combined.units_pending = sum(answer.units_pending for answer in answers)
-    combined.document_rewritten = any(answer.document_rewritten for answer in answers)
+    combined.superseded_removed = [
+        name for answer in answers for name in answer.superseded_removed
+    ]
     combined.reranked = any(answer.reranked for answer in answers)
     combined.semantic_available = all(answer.semantic_available for answer in answers)
     matched = {answer.matched_by for answer in answers}
@@ -287,7 +290,7 @@ def answer_read(
         # A record with nothing in it adopts the document instead, which is how a
         # memory written by an older version is recovered.
         index.adopt_document_if_empty()
-        answer.document_rewritten = index.write_export()
+        answer.superseded_removed = index.retire_superseded()
 
         lexical = _lexical(index, query, pool, kind)
         units_by_key.update(index.units_by_key([key for key, _ in lexical]))

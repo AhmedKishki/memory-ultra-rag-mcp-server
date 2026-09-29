@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 """``memory-ultra-rag-reindex``: bring a scope's derived state up to date.
 
 A read now keeps the word index in step with the Markdown itself, so a statement
@@ -11,7 +15,6 @@ uv run --frozen memory-ultra-rag-reindex --project-root /path/to/project
 ```
 """
 
-from __future__ import annotations
 
 import argparse
 import json
@@ -73,8 +76,55 @@ def _parser() -> argparse.ArgumentParser:
             "Used when the model cannot be fetched."
         ),
     )
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help=(
+            "Write each memory out as MEMORY.md, the prose a person reads. The "
+            "database is the memory; this is a rendering of it."
+        ),
+    )
+    parser.add_argument(
+        "--export-to",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write the rendering to this path instead of the scope's MEMORY.md. "
+            "A directory is filled with one file per scope."
+        ),
+    )
+    parser.add_argument(
+        "--retire-document",
+        action="store_true",
+        help=(
+            "Remove a MEMORY.md that adds nothing to the record. Only asks for the "
+            "file to go: one holding a statement the record lacks is read and kept."
+        ),
+    )
     parser.add_argument("--version", action="version", version=__version__)
     return parser
+
+
+def _export(
+    scope_directory: Path,
+    arguments: argparse.Namespace,
+    total: int,
+) -> str:
+    """Write one scope's memory out as prose, and say where it went.
+
+    A path with a suffix is the file to write. A path without one is a directory
+    when the run covers more than one scope, so two scopes of a project cannot
+    write over each other's rendering.
+    """
+
+    from .index import MemoryIndex
+
+    destination = Path(arguments.export_to) if arguments.export_to else None
+    if destination is not None and (destination.suffix or total > 1):
+        destination.mkdir(parents=True, exist_ok=True)
+        destination = destination / f"{scope_directory.name}.md"
+    with MemoryIndex(scope_directory) as index:
+        return str(index.write_render(destination))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -124,6 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             scopes,
             retrieval.embedder if retrieval is not None else None,
             worker=retrieval.worker_for(scopes[0]) if retrieval is not None else None,
+            retire_document=arguments.retire_document,
         )
     except (OSError, ValueError) as error:
         print(f"memory-ultra-rag-reindex: {error}", file=sys.stderr)
@@ -134,6 +185,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 retrieval.worker_for(scope).drain(timeout=30.0)
             for scope in scopes:
                 retrieval.worker_for(scope).stop()
+
+    if arguments.export or arguments.export_to:
+        for scope_directory, scope_report in zip(scopes, report["scopes"].values()):
+            written = _export(scope_directory, arguments, len(scopes))
+            scope_report["exported_to"] = written
 
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

@@ -18,6 +18,8 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
+from memory_ultra_rag_mcp.index import MemoryIndex
+
 
 def _data(result: Any) -> Any:
     data = getattr(result, "data", None)
@@ -76,8 +78,10 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
     assert recorded["directory"] == str(thesis / ".memory-rag")
 
     # The statement is inside the thesis repository, not in the shared tree.
-    standing = (thesis / ".memory-rag" / "MEMORY.md").read_text(encoding="utf-8")
-    assert "The thesis lives in drafts/" in standing
+    with MemoryIndex(thesis / ".memory-rag") as index:
+        assert [item.text for item in index.statements()] == [
+            "The thesis lives in drafts/"
+        ]
     assert not (storage / "memory" / "local-thesis").exists()
 
     # The other project recalls, and a recall searches both of its memories: its
@@ -87,12 +91,8 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
     assert "The thesis lives in drafts/" not in json.dumps(other)
     assert other["units"] == []
     # And the thesis's statement is in the thesis repository and nowhere else.
-    assert not (storage / "memory" / "default" / "MEMORY.md").exists() or (
-        "The thesis lives in drafts/"
-        not in (storage / "memory" / "default" / "MEMORY.md").read_text(
-            encoding="utf-8"
-        )
-    )
+    with MemoryIndex(storage / "memory" / "default") as index:
+        assert index.count_units() == 0
 
 
 def test_both_projects_share_the_global_memory(

@@ -311,12 +311,17 @@ class MemoryUIAdapter:
         }
 
     async def memory_standing(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        """The memory as the page edits it: statements, rendered, never a file.
+
+        The page works in text because that is what an editor is for, and the text
+        is rendered from the record rather than read from a document, so what it
+        shows is always what is remembered.
+        """
+
         directory = self.scope_directory(arguments)
-        # The read creates the standing document from UltraRAG's template when it
-        # is missing, exactly as the memory tools do.
         with MemoryIndex(directory) as index:
             index.adopt_document_if_empty()
-            index.write_export()
+            index.retire_superseded()
             return {
                 "scope": arguments.get("scope"),
                 "content": index.export(),
@@ -360,7 +365,6 @@ class MemoryUIAdapter:
                 )
             report = index.replace_all(parse_document(content))
             digest = index.export_digest()
-            index.write_export()
         return {
             "status": "saved",
             "scope": arguments.get("scope"),

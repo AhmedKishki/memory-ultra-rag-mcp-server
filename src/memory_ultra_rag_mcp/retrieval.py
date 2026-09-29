@@ -195,7 +195,6 @@ class Retrieval:
             raise ModelError(str(error)) from error
         with MemoryIndex(directory) as index:
             key, replaced = index.insert(statement, label, replace_kind=replace_kind)
-            written = index.write_export()
         queued = embed_pending(directory, self.embedder, self.worker_for(directory))
         return {
             "status": "recorded",
@@ -204,8 +203,6 @@ class Retrieval:
             "key": key,
             "replaced": replaced,
             "directory": str(directory),
-            "standing_document": str(directory / "MEMORY.md"),
-            "document_written": written,
             "embedding_model": self.policy.embedding_model,
             "units_queued": queued,
             "embedded": queued == 0,
@@ -232,22 +229,21 @@ class Retrieval:
     def maintain(self, directory: Path) -> dict[str, Any]:
         """Bring the document in line with the record, and say whether it was stale.
 
-        The document is an export, so a hand edit to it is not read: it is
-        overwritten with the record, and the caller is told, because an edit that
-        appeared to work and then vanished is worse than one that never took. A
-        record with nothing in it adopts the document instead, which is how a
-        memory written by an older version is recovered.
+        A record with nothing in it adopts a document left by an older version,
+        which is how such a memory is recovered, and anything the document still
+        held that the record lacks is imported and then removed. A rendering the
+        record agrees with is left alone: it is what somebody asked for.
         """
 
         with MemoryIndex(directory) as index:
             adopted = index.adopt_document_if_empty()
-            written = index.write_export()
+            retired = index.retire_superseded()
         queued = embed_pending(
             directory, self.embedder, self.worker_for(directory), changed=None
         )
         return {
             "adopted": adopted,
-            "document_written": written,
+            "superseded_removed": retired,
             "units_queued": queued,
         }
 
@@ -373,9 +369,6 @@ class Retrieval:
         removed = found[0]
         with MemoryIndex(removed.directory) as index:
             index.drop(removed.statement.key)
-            # The document is an export of the record, so it is written out again
-            # here or the removed statement is still on the page.
-            index.write_export()
         identity = self.embedder.identity
         with VectorStore(removed.directory, identity.name, identity.dimension) as store:
             vectors = store.forget([removed.statement.key])

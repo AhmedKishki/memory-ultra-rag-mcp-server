@@ -12,8 +12,9 @@ from starlette.testclient import TestClient
 
 from memory_ultra_rag_mcp import ui
 from memory_ultra_rag_mcp.config import ServerConfig, resolve_config
+from memory_ultra_rag_mcp.index import MemoryIndex
 from memory_ultra_rag_mcp.server import create_server
-from memory_ultra_rag_mcp.store import read_standing
+from memory_ultra_rag_mcp.store import read_document
 
 
 def _config(tmp_path: Path) -> ServerConfig:
@@ -67,7 +68,8 @@ def test_the_rounds_action_answers_empty_because_there_are_no_rounds(
     assert answered["round_count"] == 0
     assert answered["truncated"] is False
     # Asking still brings the scope into being, exactly as a read does.
-    assert read_standing(config.local_directory).startswith("# MEMORY")
+    # The page's document is the record rendered, so no file is written for it.
+    assert read_document(config.local_directory) is None
 
 
 def test_an_unknown_scope_is_refused(tmp_path: Path) -> None:
@@ -151,9 +153,11 @@ def test_the_standing_document_is_written_only_when_it_still_matches(
     assert "changed since this page was loaded" in refusal
     # The page's text became a statement, and the file is the export of it: a
     # heading, a blank line, and the memory itself.
-    assert read_standing(config.local_directory) == (
-        "# MEMORY\n\nRemember the thesis deadline.\n"
-    )
+    with MemoryIndex(config.local_directory) as index:
+        assert [item.text for item in index.statements()] == [
+            "Remember the thesis deadline."
+        ]
+    assert read_document(config.local_directory) is None
 
 
 def test_the_profile_asks_for_no_document_workspace(tmp_path: Path) -> None:
@@ -242,6 +246,5 @@ def test_the_routes_serve_the_view(tmp_path: Path) -> None:
     # The page's round write is refused; the document write is the one it has.
     assert appended.status_code == 409
     assert saved.json()["status"] == "saved"
-    assert (config.local_directory / "MEMORY.md").read_text(encoding="utf-8") == (
-        "# MEMORY\n\nKept for the thesis.\n"
-    )
+    with MemoryIndex(config.local_directory) as index:
+        assert [item.text for item in index.statements()] == ["Kept for the thesis."]

@@ -35,15 +35,14 @@ from .store import (
     normalise,
     parse_document,
     query_terms,
-    read_standing,
+    read_document,
     render_document,
     unit_key,
-    write_standing,
 )
 
 __all__ = [
     "INDEX_FILENAME",
-    "LEGACY_VECTORS_FILENAME",
+    "SUPERSEDED_FILENAMES",
     "IndexError",
     "MemoryIndex",
     "fts5_available",
@@ -56,9 +55,15 @@ __all__ = [
 #: document: the word index, the vectors, and the history no rebuild can produce.
 INDEX_FILENAME = "memory.sqlite3"
 
-#: The file a version before 5 kept its vectors in. Its rows are copied into the
-#: one file and it is then removed, so upgrading costs no re-embedding.
-LEGACY_VECTORS_FILENAME = "index-vectors.sqlite3"
+#: The files an earlier version wrote that are nothing but a copy of the record.
+#: They are read for anything the record lacks and then removed, so an upgrade
+#: costs nothing and a scope is not left holding a dead database beside a live one.
+SUPERSEDED_FILENAMES = ("index.sqlite3", "index-vectors.sqlite3")
+
+#: The file a rendering is written to, and the one a memory of an older version
+#: left behind. It is not superseded: it is what a person reads, written on
+#: request, and it is removed only when it holds a statement the record has lost.
+RENDERED_FILENAME = "MEMORY.md"
 
 #: Bumped when the schema changes, so an older file is read as a previous version
 #: rather than as this one. 3 replaced the ``kind`` column, which held one value
@@ -91,6 +96,84 @@ CREATE TABLE IF NOT EXISTS vector(
 """
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def read_unit_rows(path: Path) -> list[tuple[str, ...]] | None:
+    """Return the statements a file of an earlier shape holds, or None if unreadable.
+
+    Read-only and tolerant: the file may be a word index, a vector file, or one
+    of either without its history columns, and its field may be called `type` or
+    `kind`. The two outcomes are kept apart on purpose. A file that reads and holds
+    nothing is an empty index and may be removed; a file that cannot be read at
+    all is something this server does not understand, and a caller deciding
+    whether to delete it needs to be able to tell those apart.
+    """
+
+    if not path.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.DatabaseError:
+        return None
+    try:
+        try:
+            columns = {
+                str(record[1])
+                for record in connection.execute("PRAGMA table_info(unit)")
+            }
+            present = {
+                str(record[1])
+                for record in connection.execute("PRAGMA table_info(vector)")
+            }
+        except sqlite3.DatabaseError:
+            return None
+        if not columns and not present:
+            # A readable file with neither table holds nothing of this server's.
+            return []
+        source = "kind" if "kind" in columns else "type"
+        wanted = [
+            name for name in ("text", "unit_key", source, "stamp") if name in columns
+        ]
+        rows: list[tuple[str, ...]] = []
+        if wanted:
+            for name in ("added_at", "recalls", "last_recalled_at"):
+                if name in columns:
+                    wanted.append(name)
+            try:
+                found = connection.execute(
+                    f"SELECT {', '.join(wanted)} FROM unit"
+                ).fetchall()
+            except sqlite3.DatabaseError:
+                found = []
+            rows.extend(tuple(str(value) for value in row) for row in found)
+        if present and (not columns or "text" not in columns):
+            key_column = "kind" if "kind" in present else "type"
+            vector_wanted = [
+                name
+                for name in (
+                    "unit_key",
+                    "stamp",
+                    key_column,
+                    "model",
+                    "dimension",
+                    "components",
+                )
+                if name in present
+            ]
+            if len(vector_wanted) == 6:
+                try:
+                    found = connection.execute(
+                        f"SELECT unit_key, stamp, {key_column} FROM vector"
+                    ).fetchall()
+                except sqlite3.DatabaseError:
+                    found = []
+                rows.extend(
+                    (str(key), str(key), str(kind), str(stamp))
+                    for key, stamp, kind in found
+                )
+        return rows
+    finally:
+        connection.close()
 
 
 def _now() -> str:
@@ -144,7 +227,11 @@ class MemoryIndex:
         self._connection: sqlite3.Connection | None = None
         #: Statements read out of a file of an older shape, kept until the
         #: document has been asked whether it can supply them instead.
-        self._legacy_rows: list[tuple[str, str, str, str]] = []
+        self._legacy_rows: list[tuple[str, ...]] = []
+        #: Files an earlier version wrote, removed the first time this record was
+        #: opened after the upgrade. Disclosed, because a file vanishing from a
+        #: memory is not something a caller should have to notice on its own.
+        self.retired: list[str] = []
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -156,7 +243,7 @@ class MemoryIndex:
         keyed by the same statement digest either way, so the move is a copy.
         """
 
-        legacy = self.scope_directory / LEGACY_VECTORS_FILENAME
+        legacy = self.scope_directory / SUPERSEDED_FILENAMES[1]
         if not legacy.is_file():
             return 0
         moved = 0
@@ -208,6 +295,98 @@ class MemoryIndex:
         for suffix in ("", "-wal", "-shm"):
             Path(f"{legacy}{suffix}").unlink(missing_ok=True)
         return moved
+
+    def retire_superseded(self, *, render: bool = False) -> list[str]:
+        """Remove the copies a memory does not keep, once the record has their words.
+
+        A memory used to be two databases and a document. All three were read into
+        the record when the record became one file, and all three were left where
+        they were, so a scope kept files describing the same memory beside the one
+        that holds it: the symptom of an installation two versions at once.
+
+        Each is read first and anything the record lacks is imported, because this
+        is the one moment that can rescue a statement that exists only in an older
+        file. The databases are then removed, having never been anything but a copy.
+        A document is different: it is the rendering, so it is removed only when it
+        held something the record did not, and otherwise only when the caller asks
+        with ``render=False`` and no statement needed rescuing — which is what
+        ``--retire-document`` does. A file that cannot be read at all is left where
+        it is rather than deleted on a guess.
+        """
+
+        connection = self._open()
+        known = self.unit_keys()
+        retired: list[str] = []
+        for name in (*SUPERSEDED_FILENAMES, RENDERED_FILENAME):
+            path = self.scope_directory / name
+            if not path.is_file():
+                continue
+            rows = self._readable_rows(path)
+            if rows is None:
+                continue
+            held = {statement.text for statement in self.statements()}
+            missing = [
+                row for row in rows if row[0] not in held and row[1] not in known
+            ]
+            if missing:
+                self._adopt_legacy_unit(connection, missing)
+                held = held | {row[0] for row in missing}
+            if name == RENDERED_FILENAME and not missing and not render:
+                # A rendering the record already agrees with is what somebody asked
+                # for, so it stays until they ask for it to go.
+                continue
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{path}{suffix}").unlink(missing_ok=True)
+            retired.append(name)
+        if retired:
+            self.retired.extend(retired)
+        return retired
+
+    def write_render(self, path: Path | None = None) -> Path:
+        """Write this record out as prose, and return where it went.
+
+        The only thing in this server that writes a document, and it is asked for
+        rather than done on the way past. The file is a rendering: it is not read
+        back as memory, and the next export replaces it.
+        """
+
+        target = path or (self.scope_directory / RENDERED_FILENAME)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.export(), encoding="utf-8")
+        return target
+
+    def _readable_rows(self, path: Path) -> list[tuple[str, str, str, str]] | None:
+        """Return what a superseded file holds, or None when it cannot be read.
+
+        A database and a document are read differently and end at the same place:
+        a row of text, its identity, its kind, and its place.
+        """
+
+        if path == self.scope_directory / RENDERED_FILENAME:
+            text = read_document(self.scope_directory)
+            if text is None:
+                return None
+            return [
+                (statement.text, statement.key, statement.kind, str(statement.position))
+                for statement in parse_document(text)
+            ]
+        if path.name == SUPERSEDED_FILENAMES[1]:
+            # A vector file holds vectors and no words, so it can supply none of
+            # the record's statements; its rows are copied by `_adopt_legacy_vectors`
+            # and there is nothing here to import.
+            return []
+        rows = read_unit_rows(path)
+        if rows is None:
+            return None
+        return [
+            (
+                row[0],
+                unit_key(row[0]),
+                row[2] if len(row) > 2 else "ITEM",
+                row[3] if len(row) > 3 else "0",
+            )
+            for row in rows
+        ]
 
     def _vector_table_is_older_shape(self, connection: sqlite3.Connection) -> bool:
         """Report whether the vector table is not the shape this version writes."""
@@ -278,7 +457,8 @@ class MemoryIndex:
         row = connection.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
-        if row is not None and str(row[0]) != SCHEMA_VERSION:
+        current = str(row[0]) if row is not None else ""
+        if current and current != SCHEMA_VERSION:
             # A record from another shape is not read. The statements in it are
             # the memory, so they are not dropped: what is in the document beside
             # the file is imported instead, which is the only copy a version-5
@@ -293,10 +473,14 @@ class MemoryIndex:
                 "text, unit_key UNINDEXED, kind UNINDEXED, stamp UNINDEXED, "
                 "normalized UNINDEXED, added_at, recalls, last_recalled_at)"
             )
-        connection.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
-            (SCHEMA_VERSION,),
-        )
+        if current != SCHEMA_VERSION:
+            # Only when it differs, so a read on a current file takes no write
+            # lock: a read that had to write would fail against a scope another
+            # process is writing, and a read has no business doing that.
+            connection.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
+                (SCHEMA_VERSION,),
+            )
         self._adopt_legacy_vectors(connection)
         if self._legacy_rows:
             # This file's own rows, not the document beside it. An export holds
@@ -610,7 +794,7 @@ class MemoryIndex:
         connection.commit()
 
     def export_digest(self) -> str:
-        """Return the digest of the document this record would be written out as.
+        """Return the digest of this record rendered as a document.
 
         What the page is handed, so it can tell whether the memory changed while
         the page was open rather than overwriting somebody else's edit.
@@ -619,23 +803,13 @@ class MemoryIndex:
         return hashlib.sha256(self.export().encode("utf-8")).hexdigest()
 
     def export(self) -> str:
-        """Return the document this record would be written out as."""
+        """Return the document this record renders as: prose, newest first.
 
-        return render_document(self.statements())
-
-    def write_export(self) -> bool:
-        """Write the document out, and report whether it was out of date.
-
-        The document is an export, so a hand edit to it is not read and not kept:
-        the record is written over it and the caller is told, because an edit that
-        appeared to work and then vanished is worse than one that never took.
+        Rendered, not written. The record is the memory and this is how it reads,
+        which the browser view shows and a person can be shown.
         """
 
-        wanted = self.export()
-        if read_standing(self.scope_directory) == wanted:
-            return False
-        write_standing(self.scope_directory, wanted)
-        return True
+        return render_document(self.statements())
 
     def _adopt_document(self, connection: sqlite3.Connection, document: str) -> bool:
         """Import the statements a document holds, and return whether it held any.
@@ -666,23 +840,24 @@ class MemoryIndex:
         return adopted
 
     def adopt_document_if_empty(self) -> int:
-        """Read the document into an empty record, and return how many came in.
+        """Read a document into an empty record, and return how many came in.
 
-        What the document holds is the statements: their words and their order. The
-        kind of a recovered statement is ``ITEM`` and its date and count are empty,
-        because those were in the record and not in the file. This runs when the
-        record has nothing in it, which is both an upgrade and a recovery, and
-        never over a record that has something.
+        A memory used to be one file, so a file is how such a memory is recovered:
+        this reads the words and the order, and a statement whose kind the file
+        cannot supply becomes ``ITEM``, with no date and no count, because those
+        lived in a record this one never was. It runs when the record has nothing
+        in it, and never over a record that has something.
         """
 
         connection = self._open()
-        moved = self._adopt_document(connection, read_standing(self.scope_directory))
+        text = read_document(self.scope_directory)
+        if text is None:
+            return 0
+        moved = self._adopt_document(connection, text)
         connection.commit()
-        return (
-            int(connection.execute("SELECT count(*) FROM unit").fetchone()[0] or 0)
-            if moved
-            else 0
-        )
+        if not moved:
+            return 0
+        return int(connection.execute("SELECT count(*) FROM unit").fetchone()[0] or 0)
 
     # -- a statement's history ------------------------------------------------
 

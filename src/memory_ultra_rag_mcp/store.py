@@ -4,22 +4,19 @@ The record is the table in ``memory.sqlite3``; this module is the file written o
 from it, and the two shapes a statement takes on the way: a row, and a block of
 prose.
 
-**The document is an export, not the record.** It is written whenever the memory
-changes, it is regenerated rather than read, and a hand edit to it is overwritten
-with the record and disclosed to whoever notices. What it is for is the thing a
-database cannot be: a memory you can open with ``cat``, read, diff, commit, and
-carry to another machine. Upstream keeps the same file name, so a UltraRAG UI still
-finds the global memory where it looks — though it now reads an export of this
-server's record rather than the record itself.
+**The document is gone; what is here renders one.** The record is a table, and a
+table is the memory: one row per statement, holding its words, its kind, its place,
+when it was added, and how often it has been recalled. There is no file beside it,
+because a second copy of the same statements is a second thing to keep in step and
+one of them is eventually wrong.
 
-That also makes it a rendering and not a backup. An export holds the statements
-and nothing else: a file recovered from one has the right words in the right
-order, and every statement in it is undated and filed as ``ITEM``, because the
-types, the dates, and the counts lived in the record and not in the file. A lost
-database is therefore a memory whose categories and history are lost, and a
-recovered one is a memory of what was said rather than of how it was said. The
-alternative — writing the type into the file so the file could restore it — is a
-file of tagged lines, and that is what a memory stopped being.
+What survives of a file is the shape. ``render_document`` turns a record into the
+prose a person reads — which is what the browser view shows, and what a caller
+could be shown — and ``parse_document`` turns that prose back into statements,
+which is how the page saves an edit and how a memory of an older version is
+recovered. A document left by an earlier version is read once, for anything the
+record lacks, and then removed; that is what ``index.retire_superseded`` does, and
+it is the only path that reads a file.
 
 **A statement is one line of prose, and its type is a row, not a prefix.** Upstream
 never writes a statement, so the block format is this package's; the file it seeds
@@ -50,19 +47,19 @@ __all__ = [
     "normalise",
     "parse_document",
     "query_terms",
-    "read_standing",
+    "read_document",
     "render_document",
-    "standing_document",
     "statement_kind",
     "unit_key",
-    "write_standing",
 ]
 
-#: The file the record is written out to, which is upstream's own name.
+#: The file a previous version wrote its statements into, and upstream's own
+#: name. It is read once, for a migration, and then removed.
 EXPORT_FILENAME = "MEMORY.md"
 
-#: What a document this package writes looks like when it has nothing in it: the
-#: seed upstream writes, byte for byte.
+#: The document an earlier version created, byte for byte as upstream seeds it.
+#: Kept so a file written by that version is recognised and never mistaken for a
+#: statement.
 TEMPLATE = "# MEMORY\ni am jack. i like LLMs.\n"
 
 #: The line under the heading in that seed. It is upstream's placeholder, not a
@@ -270,56 +267,21 @@ def render_document(statements: list[Statement]) -> str:
     return "\n\n".join(parts) + "\n"
 
 
-def standing_document(scope_directory: Path) -> Path:
-    """Return the document a scope's record is written out to."""
+def read_document(scope_directory: Path) -> str | None:
+    """Return the document a previous version left, or None when there is none.
 
-    return scope_directory / EXPORT_FILENAME
-
-
-def read_standing(scope_directory: Path) -> str:
-    """Return a scope's document, creating the empty one when it has none.
-
-    Upstream creates the directory and the file from the template on the first
-    read, so the first read of a scope also initializes it, and a scope that has
-    never been written still has somewhere to put its export.
+    The only read of a file this server ever makes, and it is a migration: a
+    document written when the document was the record, read once for anything the
+    record lacks and then removed by ``MemoryIndex.retire_superseded``.
     """
 
-    scope_directory.mkdir(parents=True, exist_ok=True)
-    document = standing_document(scope_directory)
-    if not document.exists():
-        document.write_text(TEMPLATE, encoding="utf-8")
-    return document.read_text(encoding="utf-8")
-
-
-def write_standing(scope_directory: Path, content: str) -> str:
-    """Write a scope's document atomically, and return its digest.
-
-    The write is guarded by the digest the caller read, so a replacement that was
-    built from a document somebody else has since changed is refused rather than
-    silently overwriting their work.
-    """
-
-    import os
-    import tempfile
-
-    scope_directory.mkdir(parents=True, exist_ok=True)
-    payload = content if content.endswith("\n") else f"{content}\n"
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=scope_directory,
-        prefix=f".{EXPORT_FILENAME}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        temporary = Path(handle.name)
-        handle.write(payload)
+    document = scope_directory / EXPORT_FILENAME
+    if not document.is_file():
+        return None
     try:
-        os.replace(temporary, standing_document(scope_directory))
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return document.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 #: The English words a lookup does not need. This memory is English, and the word

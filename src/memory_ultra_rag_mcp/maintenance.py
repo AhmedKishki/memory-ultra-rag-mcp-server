@@ -201,6 +201,7 @@ def reindex(
     *,
     worker: EmbeddingWorker | None = None,
     batch: int = DEFAULT_BATCH,
+    retire_document: bool = False,
 ) -> dict[str, Any]:
     """Settle one or more scopes: recover, export, and embed what is missing.
 
@@ -221,11 +222,11 @@ def reindex(
         identity = embedder.identity if embedder is not None else None
         with MemoryIndex(scope_directory) as index:
             adopted = index.adopt_document_if_empty()
-            rewritten = index.write_export()
+            retired = index.retire_superseded(render=retire_document)
             units = index.unit_keys()
             store_report: dict[str, Any] = {
                 "adopted_from_document": adopted,
-                "document_rewritten": rewritten,
+                "superseded_removed": retired,
                 "units": len(units),
             }
             missing = set()

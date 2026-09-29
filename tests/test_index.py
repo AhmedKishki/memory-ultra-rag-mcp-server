@@ -21,10 +21,10 @@ from memory_ultra_rag_mcp.index import (
 )
 from memory_ultra_rag_mcp.store import (
     EXPORT_FILENAME,
+    SEED,
     Statement,
     parse_document,
-    read_standing,
-    standing_document,
+    read_document,
     unit_key,
 )
 
@@ -40,7 +40,6 @@ def _add(scope: Path, text: str, kind: str = "NOTE") -> str:
 
     with MemoryIndex(scope) as index:
         key, _replaced = index.insert(text, kind)
-        index.write_export()
         return key
 
 
@@ -50,14 +49,13 @@ def test_this_python_can_build_the_index() -> None:
     assert fts5_available() is True
 
 
-def test_the_record_lives_beside_the_document_it_is_written_out_to(
-    tmp_path: Path,
-) -> None:
+def test_the_record_is_the_one_file_a_scope_holds(tmp_path: Path) -> None:
     scope = _scope(tmp_path)
     _add(scope, "the draft lives in docs/", "NOTE")
 
     assert index_path(scope) == scope / INDEX_FILENAME
-    assert standing_document(scope).name == EXPORT_FILENAME
+    # The rendering is not written for it: a memory is the record and nothing else.
+    assert not (scope / EXPORT_FILENAME).exists()
 
 
 def test_a_scope_with_nothing_in_it_is_empty_rather_than_missing(
@@ -70,19 +68,23 @@ def test_a_scope_with_nothing_in_it_is_empty_rather_than_missing(
     assert mode == "all-words"
 
 
-def test_a_recorded_statement_is_here_and_in_the_document(tmp_path: Path) -> None:
+def test_a_recorded_statement_is_here_and_renders(tmp_path: Path) -> None:
+    """A statement is a row, and what a person reads is rendered from it."""
+
     scope = _scope(tmp_path)
     key = _add(scope, "the draft lives in docs/", "NOTE")
 
     with MemoryIndex(scope) as index:
         found, _mode = index.search("draft", 10)
         rows = index.units_by_key([key])
+        rendered = index.export()
 
     assert [row["text"] for row in found] == ["the draft lives in docs/"]
     assert rows[key]["kind"] == "NOTE"
-    assert "the draft lives in docs/" in standing_document(scope).read_text(
-        encoding="utf-8"
-    )
+    assert "the draft lives in docs/" in rendered
+    # The rendering is rendered, not written: a memory is the record and a file
+    # beside it is something somebody asked for with `--export`.
+    assert not (scope / EXPORT_FILENAME).exists()
 
 
 def test_a_statement_says_its_kind_and_the_document_does_not(tmp_path: Path) -> None:
@@ -93,7 +95,7 @@ def test_a_statement_says_its_kind_and_the_document_does_not(tmp_path: Path) -> 
 
     with MemoryIndex(scope) as index:
         found, _mode = index.search("commit", 10)
-    document = standing_document(scope).read_text(encoding="utf-8")
+    document = _rendered(scope)
 
     assert found[0]["kind"] == "RULE"
     assert "always cite the commit" in document
@@ -155,9 +157,9 @@ def test_a_new_statement_goes_to_the_top_and_renumbers_the_rest(
         "the first thing",
     ]
     assert [item.position for item in statements] == [0, 1, 2]
-    assert standing_document(scope).read_text(encoding="utf-8").index(
-        "the third thing"
-    ) < standing_document(scope).read_text(encoding="utf-8").index("the first thing")
+    assert _rendered(scope).index("the third thing") < _rendered(scope).index(
+        "the first thing"
+    )
 
 
 def test_recording_the_same_words_twice_is_one_statement(tmp_path: Path) -> None:
@@ -278,12 +280,14 @@ def test_editing_the_record_through_replace_all_keeps_what_did_not_change(
     assert order == ["always cite the commit", "the draft lives in docs/", fresh]
 
 
-def test_a_document_is_adopted_by_a_record_with_nothing_in_it(tmp_path: Path) -> None:
-    """The recovery path, and the upgrade path: a file read into an empty record."""
+def test_a_document_is_adopted_by_a_record_with_nothing_in_it(
+    tmp_path: Path,
+) -> None:
+    """The upgrade path, and the recovery path: a file read into an empty record."""
 
     scope = _scope(tmp_path)
-    standing_document(scope).write_text(
-        "# MEMORY\ni am jack. i like LLMs.\n\nPLAN: the corpus parses\n\nNOTE: cite the commit\n",
+    (scope / EXPORT_FILENAME).write_text(
+        f"# MEMORY\n{SEED}\n\nPLAN: the corpus parses\n\nNOTE: cite the commit\n",
         encoding="utf-8",
     )
 
@@ -292,49 +296,65 @@ def test_a_document_is_adopted_by_a_record_with_nothing_in_it(tmp_path: Path) ->
         # Reversed, because a prefixed file was written by a version that appended.
         assert [item.kind for item in index.statements()] == ["NOTE", "PLAN"]
         assert index.statements()[0].text == "cite the commit"
-        index.write_export()
+        # The record now holds everything the file did, so the file is a rendering
+        # the two agree on and it stays.
+        assert index.retire_superseded() == []
 
-    # And the next export has no types in it, because they are rows now.
-    document = standing_document(scope).read_text(encoding="utf-8")
-    assert "the corpus parses" in document
-    assert "PLAN" not in document
+    rendered = _rendered(scope)
+    assert "the corpus parses" in rendered
+    assert "PLAN" not in rendered
+    assert (scope / EXPORT_FILENAME).exists()
+
+    # Asked to, it goes — and a file that still held a statement would not.
+    with MemoryIndex(scope) as index:
+        assert index.retire_superseded(render=True) == [EXPORT_FILENAME]
+    assert not (scope / EXPORT_FILENAME).exists()
+    with MemoryIndex(scope) as index:
+        assert index.count_units() == 2
 
 
-def test_a_record_is_not_overwritten_by_a_hand_edited_document(
+def test_a_document_beside_the_record_is_read_for_its_words_and_removed(
     tmp_path: Path,
 ) -> None:
-    """The document is an export, and an edit to it is not read."""
+    """Whatever it holds that the record lacks is kept, and then the file goes.
+
+    A memory used to be two databases and a document, all three read into the
+    record. Leaving them behind is what made a scope look like two versions of
+    itself at once, so they are read and removed, and the answer says so.
+    """
 
     scope = _scope(tmp_path)
-    _add(scope, "the draft lives in docs/", "NOTE")
-    standing_document(scope).write_text(
-        "# MEMORY\nsomething a person typed by hand\n", encoding="utf-8"
+    _add(scope, "a recorded fact", "NOTE")
+    (scope / EXPORT_FILENAME).write_text(
+        "# MEMORY\n\nNOTE: a statement only the document knew\n", encoding="utf-8"
     )
 
     with MemoryIndex(scope) as index:
-        assert index.adopt_document_if_empty() == 0
-        assert index.write_export() is True
+        retired = index.retire_superseded()
+        restored = [item.text for item in index.statements()]
 
-    assert "something a person typed by hand" not in standing_document(scope).read_text(
-        encoding="utf-8"
-    )
-    assert "the draft lives in docs/" in standing_document(scope).read_text(
-        encoding="utf-8"
-    )
+    assert retired == [EXPORT_FILENAME]
+    assert not (scope / EXPORT_FILENAME).exists()
+    assert restored == ["a recorded fact", "a statement only the document knew"]
 
 
-def test_writing_the_export_reports_when_it_had_to(tmp_path: Path) -> None:
+def test_rendering_is_stable_for_an_unchanged_record(tmp_path: Path) -> None:
+    """What a person reads is a rendering, and rendering twice changes nothing."""
+
     scope = _scope(tmp_path)
-    _add(scope, "the draft lives in docs/", "NOTE")
+    _add(scope, "a fact", "NOTE")
 
     with MemoryIndex(scope) as index:
-        assert index.write_export() is False
-        index.insert("a new statement", "NOTE")
-        assert index.write_export() is True
+        first = index.export()
+        second = index.export()
+        assert index.export_digest() == index.export_digest()
+
+    assert first == second
+    assert first.endswith("a fact\n")
 
 
-def test_the_document_is_not_read_on_every_read(tmp_path: Path) -> None:
-    """A read that finds nothing changed costs the same whatever the memory holds."""
+def test_a_read_does_not_depend_on_a_document(tmp_path: Path) -> None:
+    """There is no document, so there is nothing for a read to fall behind on."""
 
     scope = _scope(tmp_path)
     for number in range(20):
@@ -343,12 +363,9 @@ def test_the_document_is_not_read_on_every_read(tmp_path: Path) -> None:
     with MemoryIndex(scope) as index:
         started = time.perf_counter()
         index.search("draft", 10)
-        first = time.perf_counter() - started
-        for _ in range(5):
-            index.write_export()
-            index.search("draft", 10)
+        elapsed = time.perf_counter() - started
 
-    assert first < 1.0
+    assert elapsed < 1.0
 
 
 def test_a_query_of_only_punctuation_finds_nothing(tmp_path: Path) -> None:
@@ -404,30 +421,46 @@ def test_a_search_falls_back_when_the_conjunction_is_too_strict(
     assert all_words != []
 
 
-def test_the_record_is_not_the_document(tmp_path: Path) -> None:
-    """The two are separate, and the file cannot take the record with it."""
+def test_a_record_answers_through_a_document_being_retired(tmp_path: Path) -> None:
+    """A document is read for what it holds, then removed, and the record answers."""
 
     scope = _scope(tmp_path)
     _add(scope, "the draft lives in docs/", "NOTE")
-    standing_document(scope).unlink()
+    (scope / EXPORT_FILENAME).write_text(
+        "# MEMORY\n\nNOTE: something else entirely\n", encoding="utf-8"
+    )
 
     with MemoryIndex(scope) as index:
-        assert index.count_units() == 1
         found, _mode = index.search("draft", 10)
-        index.write_export()
+        retired = index.retire_superseded()
+        statements = [item.text for item in index.statements()]
 
+    # The file is gone, what it held is kept, and the record still answers.
+    assert retired == [EXPORT_FILENAME]
+    assert not (scope / EXPORT_FILENAME).exists()
+    assert statements == ["the draft lives in docs/", "something else entirely"]
     assert [row["text"] for row in found] == ["the draft lives in docs/"]
-    assert standing_document(scope).is_file()
 
 
-def test_the_document_can_be_rebuilt_from_the_record_alone(tmp_path: Path) -> None:
+def test_a_record_renders_itself_with_nothing_else(tmp_path: Path) -> None:
     scope = _scope(tmp_path)
     _add(scope, "the draft lives in docs/", "NOTE")
     _add(scope, "always cite the commit", "RULE")
-    standing_document(scope).unlink()
 
     with MemoryIndex(scope) as index:
-        index.write_export()
+        rendered = index.export()
 
-    assert parse_document(standing_document(scope).read_text(encoding="utf-8"))
-    assert read_standing(scope).startswith("# MEMORY")
+    assert parse_document(rendered, newest_first=True)
+    assert rendered.index("always cite the commit") < rendered.index(
+        "the draft lives in docs/"
+    )
+
+
+def _rendered(scope: Path) -> str:
+    """Return the document a scope's record renders as, which is what is read."""
+
+    with MemoryIndex(scope) as index:
+        return index.export()
+
+    assert parse_document(_rendered(scope))
+    assert read_document(scope).startswith("# MEMORY")

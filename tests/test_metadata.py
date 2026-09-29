@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from memory_ultra_rag_mcp.index import (
-    LEGACY_VECTORS_FILENAME,
+    SUPERSEDED_FILENAMES,
     MemoryIndex,
     index_path,
 )
@@ -237,81 +237,81 @@ def test_a_record_is_not_lost_to_a_schema_change(tmp_path: Path) -> None:
 
 
 def test_a_document_is_recovered_by_an_empty_record(tmp_path: Path) -> None:
-    """The export is the copy that survives, and a read says it took it.
+    """A memory of an older version is its document, and that is how it is recovered.
 
-    This is what an upgrade looks like: a document written by a version that kept
-    the document as the record, and no database beside it. The read adopts the
-    document, and the export it writes back has no types in them, because they are
-    rows now.
+    The document is the only copy such a memory has, so it is read for anything
+    the record lacks and then removed, and the answer says the file went.
     """
 
     scope = tmp_path / "recovered"
     scope.mkdir()
     (scope / "MEMORY.md").write_text(
-        "# MEMORY\n" + SEED + "\n\nPLAN: the corpus parses\n\nNOTE: cite the commit\n",
+        f"# MEMORY\n{SEED}\n\nPLAN: the corpus parses\n\nNOTE: cite the commit\n",
         encoding="utf-8",
     )
     engine = _engine()
     try:
         answer = engine.answer(scope="local", directory=scope, query="corpus", limit=5)
-
-        assert answer["returned"] == 1
-        assert answer["units"][0]["kind"] == "PLAN"
         with MemoryIndex(scope) as index:
             statements = index.statements()
-            # A file with prefixes was written by a version that appended, so its
-            # last statement was its newest: importing it reverses the order.
-            assert [item.kind for item in statements] == ["NOTE", "PLAN"]
-            assert statements[0].text == "cite the commit"
     finally:
         engine.close()
 
-    document = (scope / "MEMORY.md").read_text(encoding="utf-8")
-    assert "the corpus parses" in document
-    assert "PLAN:" not in document
+    assert answer["returned"] == 1
+    assert answer["units"][0]["kind"] == "PLAN"
+    # A file this server did not write is read and removed; one it did is left.
+    assert (scope / "MEMORY.md").is_file()
+    # Reversed, because a prefixed file was written by a version that appended.
+    assert [item.text for item in statements] == [
+        "cite the commit",
+        "the corpus parses",
+    ]
+    assert [item.kind for item in statements] == ["NOTE", "PLAN"]
 
 
-def test_a_hand_edited_document_is_overwritten_and_disclosed(tmp_path: Path) -> None:
-    """An edit that appeared to work and then vanished is worse than one that never took."""
+def test_a_document_left_beside_the_record_is_read_and_then_removed(
+    tmp_path: Path,
+) -> None:
+    """A rendering is not the memory, and one holding new words is kept and read."""
+
+    engine = _engine()
+    try:
+        engine.record(directory=tmp_path, content="a recorded fact", kind="NOTE")
+        (tmp_path / "MEMORY.md").write_text(
+            "# MEMORY\n\nNOTE: something a person typed by hand\n", encoding="utf-8"
+        )
+
+        answer = engine.answer(scope="local", directory=tmp_path, query="fact", limit=5)
+        with MemoryIndex(tmp_path) as index:
+            statements = [item.text for item in index.statements()]
+
+        # The record answered for what it held, the document's own statement was
+        # kept rather than dropped, and the file is gone.
+        assert answer["returned"] == 1
+        assert statements == ["a recorded fact", "something a person typed by hand"]
+        assert "MEMORY.md" in answer["superseded_removed"]
+        assert not (tmp_path / "MEMORY.md").exists()
+    finally:
+        engine.close()
+
+
+def test_a_rendering_the_record_agrees_with_is_left_alone(tmp_path: Path) -> None:
+    """A file somebody asked for is not deleted on the next read."""
 
     engine = _engine()
     try:
         engine.record(
             directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
         )
-        (tmp_path / "MEMORY.md").write_text(
-            "# MEMORY\nsomething a person typed by hand\n", encoding="utf-8"
-        )
+        with MemoryIndex(tmp_path) as index:
+            index.write_render()
 
         answer = engine.answer(
             scope="local", directory=tmp_path, query="draft", limit=5
         )
 
-        assert answer["document_rewritten"] is True
-        assert "something a person typed by hand" not in (
-            tmp_path / "MEMORY.md"
-        ).read_text(encoding="utf-8")
-        # And the memory it was answering about is untouched.
-        assert answer["returned"] == 1
-    finally:
-        engine.close()
-
-
-def test_a_document_that_already_matches_is_left_alone(tmp_path: Path) -> None:
-    engine = _engine()
-    try:
-        engine.record(
-            directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
-        )
-        first = engine.answer(scope="local", directory=tmp_path, query="draft", limit=5)
-        second = engine.answer(
-            scope="local", directory=tmp_path, query="draft", limit=5
-        )
-
-        # The write already put the document in line, so a read finds nothing to
-        # do and says so rather than writing a file that did not need writing.
-        assert first["document_rewritten"] is False
-        assert second["document_rewritten"] is False
+        assert "superseded_removed" not in answer
+        assert (tmp_path / "MEMORY.md").is_file()
     finally:
         engine.close()
 
@@ -361,10 +361,9 @@ def test_one_file_holds_the_record_the_vectors_and_nothing_else(
 
         names = {path.name for path in tmp_path.rglob("*")}
         # The write-ahead files belong to an open connection and go when it closes;
-        # what matters is that there is no second database and no bookkeeping file.
+        # what matters is that there is no second database and no document.
         assert {name for name in names if not name.endswith(("-wal", "-shm"))} == {
-            "MEMORY.md",
-            "memory.sqlite3",
+            "memory.sqlite3"
         }
     finally:
         engine.close()
@@ -375,8 +374,10 @@ def test_an_old_vector_file_is_copied_in_rather_than_re_embedded(
 ) -> None:
     """Upgrading must not cost one embedding per statement in the memory.
 
-    The copy is keyed by the record's own identity, so the vectors that were
-    already there are the ones the record needs and nothing is embedded again.
+    A version-5 scope held its vectors in a file of their own. The upgrade moves
+    them into the one file, so the vectors the memory already paid for are the
+    ones it keeps, and a vector file is never mined for words: it holds none, which
+    is why the record is the one that has to survive.
     """
 
     engine = _engine()
@@ -387,11 +388,13 @@ def test_an_old_vector_file_is_copied_in_rather_than_re_embedded(
             directory=tmp_path, content="the draft lives in docs/", kind="NOTE"
         )
         engine.worker_for(tmp_path).drain(5.0)
-        # Move the vectors into a file of the shape version 5 wrote.
+        # Move the vectors into a file of the shape version 5 wrote, and drop them
+        # from the record, which is what that version's upgrade path left behind.
         with MemoryIndex(tmp_path) as index:
             rows = index._open().execute("SELECT * FROM vector").fetchall()
-        index_path(tmp_path).unlink()
-        with sqlite3.connect(tmp_path / LEGACY_VECTORS_FILENAME) as connection:
+            index.drop_vectors()
+            engine.close()
+        with sqlite3.connect(tmp_path / SUPERSEDED_FILENAMES[1]) as connection:
             connection.execute(
                 "CREATE TABLE vector("
                 "unit_key TEXT PRIMARY KEY, source TEXT NOT NULL, stamp TEXT, "
@@ -403,6 +406,8 @@ def test_an_old_vector_file_is_copied_in_rather_than_re_embedded(
                 [(row[0], "MEMORY.md", *tuple(row)[1:]) for row in rows],
             )
             connection.commit()
+        engine = _engine()
+        engine.embedder = embedder
 
         report = reindex([tmp_path], embedder)
 
@@ -412,11 +417,9 @@ def test_an_old_vector_file_is_copied_in_rather_than_re_embedded(
                 # One vector, and it was not embedded again: the copy is the one
                 # the record needs.
                 assert store.count() == 1
-        # The one vector the file held was copied, and the one it does not belong
-        # to any more was collected rather than left to answer for a statement that
-        # no longer exists.
-        assert report["scopes"][str(tmp_path)]["vectors_collected"] == 1
-        assert not (tmp_path / LEGACY_VECTORS_FILENAME).exists()
+        assert index_path(tmp_path) in [path for path in tmp_path.iterdir()]
+        assert not (tmp_path / SUPERSEDED_FILENAMES[1]).exists()
+        assert report["scopes"][str(tmp_path)]["units_pending"] == 0
     finally:
         engine.close()
 
@@ -562,5 +565,92 @@ def test_a_renamed_column_keeps_the_kinds_the_file_held(tmp_path: Path) -> None:
         assert restored[0].recalls == 4
         assert restored[0].added_at == "2026-09-01T00:00:00.000+00:00"
         assert restored[0].last_recalled_at == "2026-09-02T00:00:00.000+00:00"
+    finally:
+        engine.close()
+
+
+def test_an_upgraded_scope_is_not_left_holding_the_files_it_outgrew(
+    tmp_path: Path,
+) -> None:
+    """One file per scope: the old index is read for its words, then removed.
+
+    The upgrade that brought the record into one file copied the statements and the
+    vectors across and left the old databases where they were, so a scope kept a
+    dead file beside a live one and looked like an installation two versions at
+    once.
+    """
+
+    from memory_ultra_rag_mcp.index import SUPERSEDED_FILENAMES, index_path
+
+    scope = tmp_path / "scope"
+    scope.mkdir()
+    engine = _engine()
+    try:
+        engine.record(directory=scope, content="the draft lives in docs/", kind="NOTE")
+        key = unit_key("NOTE: the draft lives in docs/")
+
+        # A file of the shape the word index had before the record existed, with a
+        # statement the record has never seen and one it has.
+        stale = scope / SUPERSEDED_FILENAMES[0]
+        with sqlite3.connect(stale) as connection:
+            connection.execute(
+                "CREATE VIRTUAL TABLE unit USING fts5("
+                "text, unit_key UNINDEXED, type UNINDEXED, source UNINDEXED, "
+                "stamp UNINDEXED)"
+            )
+            connection.executemany(
+                "INSERT INTO unit(text, unit_key, type, source, stamp) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        "a statement only the old index knows",
+                        unit_key("PLAN: a statement only the old index knows"),
+                        "PLAN",
+                        "MEMORY.md",
+                        "9",
+                    ),
+                    ("NOTE: the draft lives in docs/", key, "NOTE", "MEMORY.md", "0"),
+                ],
+            )
+            connection.execute(
+                "CREATE TABLE source(path TEXT PRIMARY KEY, size INTEGER, "
+                "mtime_ns INTEGER, head TEXT)"
+            )
+            connection.commit()
+        (scope / f"{stale.name}-wal").write_bytes(b"")
+
+        answer = engine.answer(scope="local", directory=scope, query="draft", limit=5)
+
+        assert answer["superseded_removed"] == [SUPERSEDED_FILENAMES[0]]
+        assert not stale.exists()
+        assert not Path(f"{stale}-wal").exists()
+        assert index_path(scope).is_file()
+        with MemoryIndex(scope) as index:
+            restored = {item.text for item in index.statements()}
+        # What the old file still held that the record lacked is kept, not deleted.
+        assert restored == {
+            "the draft lives in docs/",
+            "a statement only the old index knows",
+        }
+    finally:
+        engine.close()
+
+
+def test_an_unreadable_superseded_file_is_left_alone(tmp_path: Path) -> None:
+    """A file this version cannot read is not deleted on a guess."""
+
+    from memory_ultra_rag_mcp.index import SUPERSEDED_FILENAMES
+
+    scope = tmp_path / "scope"
+    scope.mkdir()
+    engine = _engine()
+    try:
+        engine.record(directory=scope, content="a fact", kind="NOTE")
+        (scope / SUPERSEDED_FILENAMES[0]).write_bytes(b"not a database at all")
+
+        answer = engine.answer(scope="local", directory=scope, query="fact", limit=5)
+
+        assert (scope / SUPERSEDED_FILENAMES[0]).is_file()
+        assert "superseded_removed" not in answer
     finally:
         engine.close()

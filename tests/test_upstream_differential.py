@@ -25,7 +25,7 @@ from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 
 from memory_ultra_rag_mcp.config import global_memory_root, resolve_config
-from memory_ultra_rag_mcp.store import read_standing
+from memory_ultra_rag_mcp.store import read_document
 
 pytestmark = pytest.mark.upstream
 
@@ -189,7 +189,7 @@ def _fresh_storage(tmp_path: Path, name: str) -> Path:
     project = tmp_path / name / "project"
     project.mkdir(parents=True)
     storage = tmp_path / name / "storage"
-    read_standing(
+    read_document(
         resolve_config(project_root=project, storage_root=storage).global_directory
     )
     return storage

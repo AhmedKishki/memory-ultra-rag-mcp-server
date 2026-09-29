@@ -24,6 +24,20 @@ from memory_ultra_rag_mcp.index import MemoryIndex
 from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
 
 
+def _rendered(scope: Path) -> str:
+    """Return the document a scope's record renders as, which is what is read."""
+
+    with MemoryIndex(scope) as index:
+        return index.export()
+
+
+def _statements(scope: Path) -> list[str]:
+    """Return the statements a memory holds, which is what is read back now."""
+
+    with MemoryIndex(scope) as index:
+        return [item.text for item in index.statements()]
+
+
 def _data(result: Any) -> Any:
     """Return a tool's object response, whichever way the client handed it back."""
 
@@ -120,12 +134,8 @@ def test_recording_takes_a_scope_and_defaults_to_the_project(tmp_path: Path) -> 
     answers = asyncio.run(scenario())
     assert answers["here"]["scope"] == "local"
     assert answers["everywhere"]["scope"] == "global"
-    assert "a fact about this project" in (
-        config.local_directory / "MEMORY.md"
-    ).read_text(encoding="utf-8")
-    assert "short answers" in (config.global_directory / "MEMORY.md").read_text(
-        encoding="utf-8"
-    )
+    assert "a fact about this project" in _statements(config.local_directory)
+    assert "short answers" in _rendered(config.global_directory)
 
 
 def test_a_recall_searches_both_memories_and_ranks_them_together(
@@ -189,9 +199,7 @@ def test_forgetting_finds_the_statement_in_whichever_memory_holds_it(
 
     forgotten = asyncio.run(scenario())
     assert forgotten["scope"] == "global"
-    assert "short answers" not in (config.global_directory / "MEMORY.md").read_text(
-        encoding="utf-8"
-    )
+    assert "short answers" not in _rendered(config.global_directory)
 
 
 def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
@@ -210,12 +218,10 @@ def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
 
     recorded = asyncio.run(scenario())
     assert recorded["status"] == "recorded"
-    assert recorded["standing_document"] == str(config.local_directory / "MEMORY.md")
-    standing = (config.local_directory / "MEMORY.md").read_text(encoding="utf-8")
-    assert "The draft lives in docs/" in standing
+    assert "The draft lives in docs/" in _statements(config.local_directory)
     # A scope is one document: no dated directory, and no second Markdown file.
     assert not (config.local_directory / "project").exists()
-    assert [p.name for p in config.local_directory.glob("*.md")] == ["MEMORY.md"]
+    assert not list(config.local_directory.glob("*.md"))
     # The write is durable and the vector is queued, not computed on this thread.
     assert recorded["embedded"] is False
     assert recorded["units_queued"] == 1
@@ -271,9 +277,7 @@ def test_a_write_survives_a_model_that_cannot_be_loaded(tmp_path: Path) -> None:
 
     outcome = asyncio.run(scenario())
     assert outcome["status"] == "recorded"
-    assert "a fact" in (config.local_directory / "MEMORY.md").read_text(
-        encoding="utf-8"
-    )
+    assert _statements(config.local_directory) == ["a fact"]
     assert outcome["embedded"] is False
 
 
@@ -300,7 +304,7 @@ def test_a_global_statement_is_written_under_the_storage_root(tmp_path: Path) ->
     assert outcome["directory"] == str(config.global_directory)
     assert config.global_directory == config.storage_root / "memory" / "default"
     assert "always cite the commit" in outcome["read"]["units"][0]["text"]
-    assert (config.global_directory / "MEMORY.md").is_file()
+    assert not (config.global_directory / "MEMORY.md").exists()
 
 
 def test_a_read_answers_a_question_not_a_file(tmp_path: Path) -> None:
@@ -449,12 +453,15 @@ def test_a_read_without_a_query_is_refused(tmp_path: Path) -> None:
         asyncio.run(scenario())
 
 
-def test_a_hand_written_statement_is_not_part_of_the_memory(tmp_path: Path) -> None:
-    """The document is an export, so a hand edit to it is overwritten and said so.
+def test_a_document_left_beside_the_record_is_retired_not_remembered(
+    tmp_path: Path,
+) -> None:
+    """A file from an older version is read once, for what it holds, and then removed.
 
-    The memory is the record. A line typed into the export is not remembered, and
-    the read says the document was rewritten rather than leaving a person to find
-    out later that their edit went nowhere.
+    The record is the memory, so a document beside it is a second copy of the same
+    statements. Anything in it the record lacks is imported first, and then the
+    file goes: a scope holding both a document and a database is the symptom of an
+    installation two versions at once.
     """
 
     config = _config(tmp_path)
@@ -467,26 +474,29 @@ def test_a_hand_written_statement_is_not_part_of_the_memory(tmp_path: Path) -> N
                 {"content": "a recorded fact", "kind": "NOTE"},
                 raise_on_error=True,
             )
-            document = config.local_directory / "MEMORY.md"
-            document.write_text(
-                document.read_text(encoding="utf-8")
-                + "\n\nNOTE: a hand-written statement\n",
-                encoding="utf-8",
+            (config.local_directory / "MEMORY.md").write_text(
+                "# MEMORY\n\nNOTE: a hand-written statement\n", encoding="utf-8"
             )
-            return _data(
-                await client.call_tool("recall_memory", {"query": "hand-written"})
-            )
+            return {"before": _statements(config.local_directory)}
 
-    answered = asyncio.run(scenario())
-    assert answered["document_rewritten"] is True
-    assert not [unit for unit in answered["units"] if "hand-written" in unit["text"]]
-    # And the memory it was answering about is untouched.
-    assert "a recorded fact" in (config.local_directory / "MEMORY.md").read_text(
-        encoding="utf-8"
-    )
-    assert "hand-written" not in (config.local_directory / "MEMORY.md").read_text(
-        encoding="utf-8"
-    )
+    asyncio.run(scenario())
+    # The document is beside the record and not part of it: nothing has read it
+    # yet, so its statement is not in the record and it is still on disk.
+    assert _statements(config.local_directory) == ["a recorded fact"]
+    assert (config.local_directory / "MEMORY.md").exists()
+
+    async def after() -> dict[str, Any]:
+        async with Client(app) as client:
+            answer = _data(
+                await client.call_tool(
+                    "recall_memory", {"query": "recorded fact"}, raise_on_error=True
+                )
+            )
+            return answer | {"statements": _statements(config.local_directory)}
+
+    answered = asyncio.run(after())
+    assert answered["statements"] == ["a recorded fact", "a hand-written statement"]
+    assert not (config.local_directory / "MEMORY.md").exists()
 
 
 def test_a_statement_adopted_from_an_export_is_counted_as_untyped(
@@ -515,15 +525,15 @@ def test_a_statement_adopted_from_an_export_is_counted_as_untyped(
     assert answered["units"][0]["kind"] == "ITEM"
 
 
-def test_a_read_keeps_serving_a_statement_deleted_from_the_export(
+def test_a_read_reads_a_document_beside_the_record_and_then_removes_it(
     tmp_path: Path,
 ) -> None:
-    """Deleting a line from the export does not forget anything.
+    """A document is a migration source, not a second copy of the memory.
 
-    A statement is forgotten by `forrecall_memory` or by nobody: the export is
-    written from the record, so an edit to it is overwritten with the record and
-    disclosed. A read that quietly served less because a line was cut from a file
-    would be a read whose answer depends on a file it does not read.
+    Whatever it holds that the record lacks is imported, and then the file goes. A
+    statement is forgotten by `forget_memory` and by nothing else: a read whose
+    answer depended on a file it did not read would be a read that quietly served
+    less because a line was cut somewhere else.
     """
 
     config = _config(tmp_path)
@@ -536,26 +546,28 @@ def test_a_read_keeps_serving_a_statement_deleted_from_the_export(
                 {"content": "a doomed fact", "kind": "NOTE"},
                 raise_on_error=True,
             )
-            document = config.local_directory / "MEMORY.md"
-            document.write_text(
-                document.read_text(encoding="utf-8").replace("a doomed fact", ""),
-                encoding="utf-8",
+            (config.local_directory / "MEMORY.md").write_text(
+                "# MEMORY\n\nNOTE: something else entirely\n", encoding="utf-8"
             )
-            return _data(
+            first = _data(
                 await client.call_tool(
                     "recall_memory", {"query": "doomed"}, raise_on_error=True
                 )
             )
+            return first | {"statements": _statements(config.local_directory)}
 
     answered = asyncio.run(scenario())
+    # The record answered for what it held, the document's statement was kept
+    # rather than obeyed or dropped, and the document is gone.
     assert [unit["text"] for unit in answered["units"]] == ["a doomed fact"]
-    assert answered["document_rewritten"] is True
+    assert answered["statements"] == ["a doomed fact", "something else entirely"]
+    assert not (config.local_directory / "MEMORY.md").exists()
 
 
-def test_an_unchanged_read_does_not_write_the_document_again(
+def test_an_unchanged_read_removes_nothing_and_touches_nothing(
     tmp_path: Path,
 ) -> None:
-    """A read that finds the document in line says so, and writes nothing."""
+    """A read on a current record is a query, and nothing else."""
 
     config = _config(tmp_path)
     app = _app(config, FakeEmbedder())
@@ -572,10 +584,16 @@ def test_an_unchanged_read_does_not_write_the_document_again(
             return {"first": first, "second": second}
 
     answered = asyncio.run(scenario())
-    # A read brings both documents in line, and the account's is written out the
-    # first time. The second read finds nothing to do and says so.
-    assert answered["first"]["document_rewritten"] is True
-    assert answered["second"]["document_rewritten"] is False
+    assert "superseded_removed" not in answered["first"]
+    assert "superseded_removed" not in answered["second"]
+    assert answered["first"]["units"][0]["recalls"] == 1
+    assert answered["second"]["units"][0]["recalls"] == 2
+    # The write-ahead files belong to the open connection and go when it closes.
+    assert sorted(
+        path.name
+        for path in config.local_directory.iterdir()
+        if not path.name.endswith(("-wal", "-shm"))
+    ) == ["memory.sqlite3"]
 
 
 def test_the_two_memories_do_not_share_a_directory(tmp_path: Path) -> None:
@@ -609,16 +627,8 @@ def test_the_two_memories_do_not_share_a_directory(tmp_path: Path) -> None:
     here, everywhere = asyncio.run(scenario())
     assert (here["scope"], everywhere["scope"]) == ("local", "global")
     assert config.local_directory != config.global_directory
-    assert (
-        (config.local_directory / "MEMORY.md")
-        .read_text(encoding="utf-8")
-        .endswith("a project fact\n")
-    )
-    assert (
-        (config.global_directory / "MEMORY.md")
-        .read_text(encoding="utf-8")
-        .endswith("short answers\n")
-    )
+    assert _rendered(config.local_directory).endswith("a project fact\n")
+    assert _rendered(config.global_directory).endswith("short answers\n")
 
 
 def test_a_project_read_cannot_see_another_projects_memory(tmp_path: Path) -> None:
@@ -704,11 +714,7 @@ def test_a_kind_defaults_to_item_and_a_bad_one_is_refused(tmp_path: Path) -> Non
     # The type is a column of the record, and the file states the memory itself.
     with MemoryIndex(config.local_directory) as index:
         assert [item.kind for item in index.statements()] == ["ITEM"]
-    assert (
-        (config.local_directory / "MEMORY.md")
-        .read_text(encoding="utf-8")
-        .endswith("a fact\n")
-    )
+    assert _rendered(config.local_directory).endswith("a fact\n")
 
 
 def test_a_read_returns_the_kind_and_not_the_kind_in_the_text(
@@ -834,9 +840,7 @@ def test_a_failing_model_is_reported_and_the_write_still_lands(tmp_path: Path) -
     recorded = asyncio.run(scenario())
     assert recorded["status"] == "recorded"
     assert recorded["embedded"] is False
-    assert "a rule" in (config.global_directory / "MEMORY.md").read_text(
-        encoding="utf-8"
-    )
+    assert "a rule" in _rendered(config.global_directory)
 
 
 def test_a_handoff_replaces_the_previous_one(tmp_path: Path) -> None:
@@ -873,7 +877,7 @@ def test_a_handoff_replaces_the_previous_one(tmp_path: Path) -> None:
     assert [item.text for item in handoffs] == ["session two: the corpus parses now"]
     # The replaced handoff is gone, and gone from the document rather than merely
     # from the newest one.
-    document = (config.local_directory / "MEMORY.md").read_text(encoding="utf-8")
+    document = _rendered(config.local_directory)
     assert "session two" in document
     assert "session one" not in document
 
@@ -941,7 +945,7 @@ def test_forgetting_removes_exactly_the_statement_named(tmp_path: Path) -> None:
 
     with MemoryIndex(config.local_directory) as index:
         remaining = [item.text for item in index.statements()]
-    document = (config.local_directory / "MEMORY.md").read_text(encoding="utf-8")
+    document = _rendered(config.local_directory)
     assert remaining == ["always cite the commit"]
     assert "the draft lives in docs/" not in document
     assert "always cite the commit" in document

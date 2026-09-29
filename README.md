@@ -5,7 +5,7 @@
 - **local memory** belongs to the project this server is bound to and lives inside that repository, under `.memory-rag`, so a project carries its memory with it and no other project reads it;
 - **global memory** belongs to the account and lives in UltraRAG's shared storage tree, so every instance serving that tree reads the same memory. It is not a project's: who the user is, what they want remembered everywhere, and the **durable rules that apply wherever they work**.
 
-Both kinds are one standing document per scope, `MEMORY.md`, of statements in UltraRAG's format, and the two kinds take the same arguments. A standing instruction the user gave once belongs in global memory, where it is read at the start of every conversation, rather than anywhere local.
+Each kind is one file, `memory.sqlite3`, holding statements in UltraRAG's shape, and the two kinds take the same arguments. A standing instruction the user gave once belongs in global memory, where it is read at the start of every conversation, rather than anywhere local.
 
 There are no dated rounds. Upstream keeps a day-per-file dialogue log beside the standing document; this server does not, because anything worth keeping is recorded as a statement. Every divergence from upstream is in the choice table below.
 
@@ -123,21 +123,34 @@ The shared page still asks for dated exchanges, because it fetches them under th
 ## Storage
 
 ```
-<project-root>/.memory-rag/MEMORY.md                  the project's standing memory: the record
-<project-root>/.memory-rag/memory.sqlite3              word index, vectors, and each statement's history
-<storage-root>/memory/default/MEMORY.md            the account's global standing memory: the record
-<storage-root>/memory/default/memory.sqlite3          word index, vectors, and each statement's history
+<project-root>/.memory-rag/memory.sqlite3          the project's memory: the record
+<storage-root>/memory/default/memory.sqlite3        the account's memory: the record
 ```
 
-The global memory lives in `memory/default/`: `memory` is UltraRAG's own directory name, and `default` is the user it names when none is given, which keeps the layout upstream's and keeps a UltraRAG UI able to read it. It is one memory, not one per user, and the tools take no identifier for it.
+**The record is one file.** Every statement is a row in
+`memory.sqlite3`: its text, the kind it was filed under, its place in the
+document, when it was added, how often it has been recalled, and one vector for
+the meaning side. The same table is the FTS5 word index, so a statement is stored
+once and found by words without a second copy to keep in step.
 
-**The record is the table.** `memory.sqlite3` holds every statement: its text, the kind it was filed under, its place in the document, and when it was added and how often it has been recalled. The same table is the FTS5 word index, so a statement is stored once and found by words without a second copy to keep in step. A statement is one line of prose and a row — not a tagged line.
+**`MEMORY.md` is a rendering, not the memory.** It is the same statements as
+plain prose, newest first, and it is written only when it is asked for:
 
-`MEMORY.md` is an **export** of that record: the same statements as plain prose, newest first, rewritten whenever the memory changes and on a reindex. It is what a database cannot be — a memory you can open, read, diff, commit, and carry. It is not read as an input, so a hand edit to it is overwritten with the record and the read that notices says so, and it is a rendering rather than a backup: a file recovered from one has the right words in the right order, every statement undated and filed as `ITEM`, because the types, the dates, and the counts lived in the record.
+```bash
+memory-ultra-rag-reindex --project-root ~/my-research --export
+memory-ultra-rag-reindex --project-root ~/my-research --export-to ~/notes/memories
+```
 
-An empty scope, before anything is recorded, holds the template UltraRAG seeds a document with:
+A rendering is not read back as memory, and the next export replaces it. A
+document left by an older version — when the document *was* the memory — is read
+once for any statement the record lacks and is then removed, so a scope holding
+both a document and a database is not a state this server leaves behind. One
+that agrees with the record is left alone, because it is what somebody asked for;
+`--retire-document` asks for it to go.
 
-```markdown
+The browser view shows the same rendering, rendered from the record on every
+request, so the page can never show a document the memory has moved past.
+markdown
 # MEMORY
 i am jack. i like LLMs.
 ```
@@ -223,12 +236,15 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 31 | When a statement was added, and how often it has been recalled, are a table in the same SQLite file as the word index | a statement that has been recalled fifty times and one that has never been recalled are not equally worth keeping, and neither fact is in the Markdown, whose bytes must stay the record and stay compatible with what upstream and a UltraRAG UI read. Putting the history in the file the read already has open means a recall is one `UPDATE` per statement answered, in the transaction the answer was read in: atomic without a temporary file, no background thread, and proportional to the answer rather than to the memory. The file is therefore no longer purely derived — deleting it costs a re-read *and* the counts, which is stated rather than assumed, and the document itself is never in its power to lose. A separate JSON file was the first shape of this and needed a background writer precisely because it was not in the transaction |
 | 32 | A column that cannot vary is not kept, and the field is called `kind` | a `kind` column held `statement` for every row and said nothing, because a scope is one document of statements. A column that cannot vary is a claim the schema makes and does not keep. The field that does vary is the statement's own kind, and it is the column now (`kind`), indexed with the statement so a read can be narrowed to one |
 
-| 33 | The record is the table, and `MEMORY.md` is an export of it | a memory is meant to be a thing a person owns, and a SQLite file is a thing a person cannot read, diff, commit, or carry. Upstream's whole design is a Markdown file in a project's repository, and a UltraRAG UI reads the global one from the shared storage tree; a record that is not a file breaks both. The table holds every statement, its kind, its position, its date, and its count, and the file is written from it. What is given up is stated rather than implied: a hand edit to the file does not take and is disclosed, a kind is a column and so is asked for rather than searched for, and a file recovered from an export has the words in the right order with every statement undated and filed as `ITEM` |
+| 33 | The record is one SQLite file, and `MEMORY.md` is a rendering of it written on request | two copies of the same statements is one thing too many, and the copy that is written by hand is the one that drifts. So the record is the table, and the document is rendered from it — by `--export`, and by the browser view on every request — and is never read back as memory. A memory written before this existed is recovered from the file it is in, and a rendering that a server wrote is left alone until someone asks for it to go. What is given up is stated rather than implied: a UltraRAG UI can no longer read the global memory out of the shared storage tree, and a memory is read with this server rather than with `cat` |
 | 34 | A statement's kind is a column, not a prefix on its line | `RULE: the draft lives in docs/` is a tagged line, and a file of them reads as data rather than as something a person wrote — which is what a memory is for. The kind is still one run of block letters and still the caller's, and it is still returned with every answer; what changed is that it is held with the statement instead of inside its text, so a read narrows to a category rather than searching for a word that is no longer there. A file written before this is read once on upgrade and its prefixes become kinds |
 | 35 | The export holds the statements and nothing else | A file that carried the kinds, the dates, and the counts would be a second record to keep in step, and keeping two in step is how a memory loses a statement. So the file is a rendering: the words, in order. It is regenerated on every write, so it cannot drift; it is not read, so it cannot be wrong; and a memory lost with its database comes back as what was said rather than as how it was said, which is the honest limit of a file that was never a backup |
 
 | 36 | A recall searches both memories and ranks the results together | a caller asking what is remembered is asking one question, and the answer is the best statement from either memory rather than the best from each in turn. The scores are the same measure in every scope, so a statement from the account's memory does not outrank a better match from the project's, and every statement names the scope it came from so the caller can say which memory it was quoting |
 | 37 | `scope` is one argument with `local` as its default, rather than a tool per memory | a project fact written to the account's memory is wrong everywhere else and a standing instruction left in one project goes unnoticed in the rest. One tool with a defaulted argument makes the project the default that a caller has to choose against, and it leaves the two memories named in one place instead of across seven tool names |
+
+| 38 | A rendering is written only when it is asked for, and is not read back | a file the server rewrites whenever the memory changes is a second record in everything but name, and one nobody asked for. So `--export` writes it, the page renders it, and nothing else does. A rendering is stale the moment a statement is recorded, which is what a rendering is, and the honest way to offer one is to say it is generated rather than to keep it silently in step |
+| 39 | A document from an older version is read and then removed, and one this server wrote is left alone | a memory of an earlier version exists as a file, so the file has to be read once for anything the record lacks — and then it is gone, because a scope holding both a document and a database is the state a user recognises as two versions of one thing. A rendering this server wrote is a different case: it was asked for, it is not a record, and `--retire-document` is how it is asked for again |
 
 ## Develop and test
 

@@ -124,8 +124,8 @@ WHAT ELSE AN ANSWER TELLS YOU
 
   hint                present only when nothing matched, and says what to try
   units_pending       statements findable by words whose vector is not ready
-  document_rewritten  the document was written out from the record again; an edit
-                      to the file by hand does not change the memory
+  superseded_removed  a file an earlier version left was read for anything it held
+                      that the memory did not have, and then removed
   semantic_available  false when only the words were searched, so only the exact
                       words would have found anything
 

@@ -54,7 +54,6 @@ def _populate(directory: Path, statements: int = 200) -> None:
                 f"note {number} about the draft",
                 "NOTE",
             )
-        index.write_export()
 
 
 def test_a_read_does_no_work_proportional_to_the_memory(tmp_path: Path) -> None:
@@ -143,9 +142,8 @@ def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
 
     recorded = asyncio.run(scenario())
     # The statement is durable now; the vector is the worker's problem.
-    assert "a fact" in (config.local_directory / "MEMORY.md").read_text(
-        encoding="utf-8"
-    )
+    with MemoryIndex(config.local_directory) as index:
+        assert [item.text for item in index.statements()] == ["a fact"]
     assert recorded["units_queued"] == 1
     assert recorded["embedded"] is False
     engine.worker_for(config.local_directory).drain(5.0)
@@ -172,11 +170,14 @@ def test_a_write_touches_only_what_it_wrote(tmp_path: Path) -> None:
         assert index.count_units() == 51
         found, _ = index.search("more", 10)
         assert [row["text"] for row in found] == ["one more statement"]
-    # And the document was written out with the statement at the top of it.
-    document = (directory / "MEMORY.md").read_text(encoding="utf-8")
-    assert document.index("one more statement") < document.index(
+    # And a rendering puts the new statement at the top of it, while the memory
+    # itself stays one record and no file.
+    with MemoryIndex(directory) as index:
+        rendered = index.export()
+    assert rendered.index("one more statement") < rendered.index(
         "note 0 about the draft"
     )
+    assert not (directory / "MEMORY.md").exists()
 
 
 def test_the_vectors_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:
