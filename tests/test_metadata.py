@@ -514,6 +514,10 @@ def test_a_renamed_column_keeps_the_kinds_the_file_held(tmp_path: Path) -> None:
         engine.record(directory=tmp_path, content="the oldest note", kind="TEST")
         engine.record(directory=tmp_path, content="the newest plan", kind="PLAN")
         engine.answer(scope="local", directory=tmp_path, query="plan", limit=5)
+        # Both records queued a vector, and the worker writes to the same file
+        # this test is about to rewrite underneath the engine. Wait for it, or
+        # the rewrite races a write and the file holds a third state.
+        engine.worker_for(tmp_path).drain(5.0)
 
         # A file of the previous version: the field is called `type`.
         with sqlite3.connect(index_path(tmp_path)) as connection:

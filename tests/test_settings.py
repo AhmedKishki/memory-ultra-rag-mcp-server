@@ -13,7 +13,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-
 from config_ultra_rag_mcp import (
     LAYER_COMMAND_LINE,
     LAYER_DEFAULT,
@@ -155,9 +154,7 @@ def test_a_number_written_as_text_is_read_the_same_way_everywhere(
     from_file = _resolve(
         tmp_path, config_path=_overlay(tmp_path, "[retrieval]\nrrf_k = 30\n"), **EMPTY
     )
-    from_env = _resolve(
-        tmp_path, environ={"MEMORY_ULTRARAG_RETRIEVAL_RRF_K": "30"}
-    )
+    from_env = _resolve(tmp_path, environ={"MEMORY_ULTRARAG_RETRIEVAL_RRF_K": "30"})
     from_set = _resolve(tmp_path, overrides=["retrieval.rrf_k=30"], **EMPTY)
 
     assert from_file.rrf_k == from_env.rrf_k == from_set.rrf_k == 30
@@ -221,9 +218,7 @@ def test_printing_names_every_value_and_the_layer_that_supplied_it(
     path = _overlay(tmp_path, "[retrieval]\nrecency_bonus = 0.25\n")
 
     settings = _resolve(tmp_path, config_path=path, **EMPTY)
-    printed = describe_settings(
-        SETTINGS, settings.as_values(), settings.provenance
-    )
+    printed = describe_settings(SETTINGS, settings.as_values(), settings.provenance)
 
     for setting in SETTINGS:
         assert setting.key in printed
