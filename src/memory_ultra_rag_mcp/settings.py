@@ -1,4 +1,4 @@
-"""Every tunable this server reads, as one registry and one stack of layers.
+"""Every tunable this server reads, as one registry over a shared layer stack.
 
 The settings are declared in a table here and shipped as ``default.toml`` beside
 this module, so a value that exists in code and a value a file may set cannot
@@ -13,124 +13,57 @@ The layers, lowest precedence first:
 3. the project's own ``config.toml``, inside the project's own state, for a
    project that wants to differ from the account;
 4. a file named with ``--config``;
-5. ``MEMORY_ULTRARAG_*`` environment variables;
+5. ``MEMORY_ULTRARAG_*`` environment variables, one declared per setting;
 6. ``--set key=value`` on the command line.
 
 Each layer names only the keys it changes, and every effective value reports the
 layer that supplied it, so ``--print-config`` can say where a number came from
 rather than only what it is.
+
+The stack itself, the registry's ``Setting`` type, the coercion every layer
+shares, the provenance, and the three path helpers live in the separately
+versioned ``config-ultra-rag-mcp`` library, pinned by commit. What is left here
+is this server's own vocabulary: the keys, their types and bounds, the packaged
+default, and the effective settings the code reads.
 """
 
 from __future__ import annotations
 
-import os
-import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-import platformdirs
+from config_ultra_rag_mcp import (
+    Setting,
+    SettingsError,
+    SettingsSources,
+    default_config_path,
+    project_config_path,
+    user_config_path,
+)
 
 __all__ = [
-    "DEFAULT_CONFIG_FILENAME",
-    "PROJECT_CONFIG_RELATIVE",
     "SETTINGS",
     "SETTINGS_BY_KEY",
-    "SETTINGS_ENVIRONMENT_PREFIX",
     "EffectiveSettings",
     "Setting",
     "SettingsError",
-    "default_config_path",
-    "describe_settings",
-    "merge_settings",
-    "project_config_path",
-    "read_config_document",
-    "resolve_settings",
-    "user_config_path",
+    "SettingsSources",
+    "sources_for",
 ]
 
-#: The layer names, lowest first. `provenance` reports these strings, so
-#: `--print-config` says where each effective value came from.
-LAYER_DEFAULT = "default"
-LAYER_USER = "user config"
-LAYER_PROJECT = "project config"
-LAYER_FILE = "--config"
-LAYER_ENVIRONMENT = "environment"
-LAYER_COMMAND_LINE = "command line"
-
-DEFAULT_CONFIG_FILENAME = "default.toml"
+#: The names this server resolves its own layers by, which the shared stack takes
+#: as arguments. The account directory and the project file are this server's
+#: choice: another server in this collection names its own.
 USER_CONFIG_DIRECTORY = "memory-ultra-rag-mcp"
 PROJECT_CONFIG_RELATIVE = Path(".memory-rag") / "config.toml"
-SETTINGS_ENVIRONMENT_PREFIX = "MEMORY_ULTRARAG_"
 
-#: What a setting decides, which is the contract that keeps configurability honest.
-#:
-#: * ``identity`` — the value decides what a memory is made of. It is written beside
-#:   the statements it produced, so changing it means the statements are embedded
-#:   again rather than compared across two spaces.
-#: * ``runtime`` — the value chooses where something lives or how the process is
-#:   shaped. Changing it moves or resizes something without changing what a
-#:   statement is.
-#: * ``retrieval`` — the value decides what a read admits and in what order.
-Layer = Literal["identity", "runtime", "retrieval"]
-
-
-class SettingsError(ValueError):
-    """Raised when a settings layer is unreadable, unknown, or out of bounds."""
-
-
-@dataclass(frozen=True, slots=True)
-class Setting:
-    """One tunable: where it lives, what it accepts, and how it is named.
-
-    ``layer`` is the contract that keeps configurability honest:
-
-    * ``identity`` — the value decides what a memory is made of. It is recorded
-      with the statements it produced, so changing it means they are embedded
-      again rather than compared across two spaces.
-    * ``runtime`` — the value chooses where something lives, and changing it moves
-      or resizes something without changing what a statement is.
-    * ``retrieval`` — the value decides what a read admits and in what order.
-    """
-
-    key: str
-    field: str
-    kind: type
-    layer: Layer
-    doc: str
-    minimum: float | None = None
-    maximum: float | None = None
-    # A setting that accepts an empty string uses it to mean something of its own —
-    # this package's own cache, no cross-encoder — rather than a missing value.
-    empty: str | None = None
-
-    def coerce(self, raw: Any, *, source: str) -> Any:
-        """Return ``raw`` as this setting's type, or refuse it by name.
-
-        The same call serves every layer, so a number written in TOML and the
-        same number written in the environment or after ``--set`` are read one
-        way and fail the same way.
-        """
-
-        where = f"{self.key} ({source})"
-        if isinstance(raw, bool) and self.kind is not bool:
-            raise SettingsError(f"{where} must be {self.kind.__name__}, not a boolean")
-        if isinstance(raw, str) and not raw.strip() and self.empty is not None:
-            return self.empty
-        if isinstance(raw, str) and not raw.strip() and self.kind is str:
-            return ""
-        try:
-            value = self.kind(raw)
-        except (TypeError, ValueError) as exc:
-            raise SettingsError(f"{where} must be {self.kind.__name__}") from exc
-        if self.kind is str:
-            value = value.strip()
-        if self.minimum is not None and value < self.minimum:
-            raise SettingsError(f"{where} must be at least {self.minimum:g}")
-        if self.maximum is not None and value > self.maximum:
-            raise SettingsError(f"{where} must be at most {self.maximum:g}")
-        return value
+#: Every setting below carries one of this server's own three classes: `identity`,
+#: which decides what a memory is made of and is written beside the statements it
+#: produced; `runtime`, which chooses where something lives; and `retrieval`, which
+#: decides what a read admits and in what order. The shared stack carries the word
+#: through untouched, because that classification is this server's to make.
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -140,6 +73,7 @@ SETTINGS: tuple[Setting, ...] = (
         str,
         "runtime",
         "Shared FastEmbed model cache.",
+        env="MEMORY_ULTRARAG_MODEL_CACHE_ROOT",
         empty="",
     ),
     Setting(
@@ -148,6 +82,7 @@ SETTINGS: tuple[Setting, ...] = (
         float,
         "retrieval",
         "The cosine a dense candidate must clear to be admitted at all.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_COSINE_FLOOR",
         minimum=-1.0,
         maximum=1.0,
     ),
@@ -157,6 +92,7 @@ SETTINGS: tuple[Setting, ...] = (
         float,
         "retrieval",
         "How far under its own best a candidate may be and still be admitted.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_RELATIVE_MARGIN",
         minimum=0.0,
         maximum=1.0,
     ),
@@ -166,6 +102,7 @@ SETTINGS: tuple[Setting, ...] = (
         float,
         "retrieval",
         "The weight the words contribute to a fused score.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_BM25_WEIGHT",
         minimum=0.0,
     ),
     Setting(
@@ -174,6 +111,7 @@ SETTINGS: tuple[Setting, ...] = (
         float,
         "retrieval",
         "The weight the meaning contributes to a fused score.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_DENSE_WEIGHT",
         minimum=0.0,
     ),
     Setting(
@@ -182,6 +120,7 @@ SETTINGS: tuple[Setting, ...] = (
         int,
         "retrieval",
         "The reciprocal rank fusion constant; larger flattens the sides' ranks.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_RRF_K",
         minimum=1.0,
     ),
     Setting(
@@ -190,6 +129,7 @@ SETTINGS: tuple[Setting, ...] = (
         float,
         "retrieval",
         "What a statement is worth for being the newest of those that matched.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_RECENCY_BONUS",
         minimum=0.0,
         maximum=1.0,
     ),
@@ -199,6 +139,7 @@ SETTINGS: tuple[Setting, ...] = (
         float,
         "retrieval",
         "How alike two statements may be before the second is refused.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_DUPLICATE_COSINE",
         minimum=-1.0,
         maximum=2.0,
     ),
@@ -208,6 +149,7 @@ SETTINGS: tuple[Setting, ...] = (
         int,
         "retrieval",
         "How many candidates each side contributes before fusion.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_POOL_DEPTH",
         minimum=1.0,
     ),
     Setting(
@@ -216,6 +158,7 @@ SETTINGS: tuple[Setting, ...] = (
         int,
         "retrieval",
         "How many fused candidates the cross-encoder reads.",
+        env="MEMORY_ULTRARAG_RETRIEVAL_RERANK_DEPTH",
         minimum=0.0,
     ),
     Setting(
@@ -224,6 +167,7 @@ SETTINGS: tuple[Setting, ...] = (
         str,
         "identity",
         "The local model a scope's vectors are built with.",
+        env="MEMORY_ULTRARAG_EMBEDDING_MODEL",
     ),
     Setting(
         "dense.reranker_model",
@@ -231,6 +175,7 @@ SETTINGS: tuple[Setting, ...] = (
         str,
         "identity",
         "The local cross-encoder that orders candidates, or empty for none.",
+        env="MEMORY_ULTRARAG_RERANKER_MODEL",
         empty="",
     ),
 )
@@ -238,6 +183,24 @@ SETTINGS: tuple[Setting, ...] = (
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 SETTINGS_BY_FIELD = {setting.field: setting for setting in SETTINGS}
 SETTINGS_SECTIONS = tuple(dict.fromkeys(s.key.split(".")[0] for s in SETTINGS))
+
+
+def sources_for(project_root: str | Path) -> SettingsSources:
+    """Return where this server's file layers live for one project.
+
+    The three names are this server's own: the account directory that applies to
+    every project, the project file inside `.memory-rag`, and the packaged
+    default that ships beside this module. The shared stack reads them and
+    nothing else.
+    """
+
+    project = Path(project_root)
+    return SettingsSources(
+        default_file=default_config_path(__file__),
+        user_config=user_config_path(USER_CONFIG_DIRECTORY),
+        project_root=project,
+        project_config=project_config_path(project, PROJECT_CONFIG_RELATIVE),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +234,11 @@ class EffectiveSettings:
                 return found[name]
         raise AttributeError(name)
 
+    def as_values(self) -> dict[str, Any]:
+        """Return the effective values keyed by field, the shape the stack reads."""
+
+        return {setting.field: getattr(self, setting.field) for setting in SETTINGS}
+
     def cache_root(self) -> str:
         """Return the configured shared cache directory, or "" for this package's own.
 
@@ -280,197 +248,3 @@ class EffectiveSettings:
         """
 
         return str(self.runtime["model_cache_root"])
-
-
-def default_config_path() -> Path:
-    """Return the packaged default config file."""
-
-    return Path(__file__).with_name(DEFAULT_CONFIG_FILENAME)
-
-
-def user_config_path() -> Path:
-    """Return the per-user overlay path for this platform.
-
-    This is the layer that applies globally: one file in the account's config
-    directory changes every project on the account.
-    """
-
-    return platformdirs.user_config_path(USER_CONFIG_DIRECTORY) / "config.toml"
-
-
-def project_config_path(project_root: str | Path) -> Path:
-    """Return the per-project overlay path, inside the project's own state."""
-
-    return Path(project_root) / PROJECT_CONFIG_RELATIVE
-
-
-def read_config_document(path: Path, *, source: str) -> dict[str, Any]:
-    """Read one TOML layer, refusing anything that is not a plain document."""
-
-    if path.is_symlink():
-        raise SettingsError(f"{source} must not be a symlink: {path}")
-    if not path.is_file():
-        raise SettingsError(f"{source} is not a readable file: {path}")
-    try:
-        with path.open("rb") as handle:
-            document = tomllib.load(handle)
-    except tomllib.TOMLDecodeError as exc:
-        raise SettingsError(f"{source} is not valid TOML ({path}): {exc}") from exc
-    except OSError as exc:
-        raise SettingsError(f"{source} cannot be read ({path}): {exc}") from exc
-    if not isinstance(document, dict):
-        raise SettingsError(f"{source} must contain a TOML table: {path}")
-    return document
-
-
-def merge_settings(
-    base: dict[str, Any],
-    overlay: Mapping[str, Any],
-    *,
-    source: str,
-    prefix: str = "",
-) -> set[str]:
-    """Merge one layer into ``base`` per key, and return the keys it set.
-
-    Tables merge recursively, so a layer names only what it changes. A scalar
-    replaces whatever the layer below had. A key the registry does not declare is
-    an error, which is what makes a typo loud instead of silent.
-    """
-
-    written: set[str] = set()
-    for key, value in overlay.items():
-        if not isinstance(key, str):
-            raise SettingsError(f"{source} has a non-string key: {key!r}")
-        dotted = f"{prefix}{key}"
-        if isinstance(value, Mapping):
-            if dotted in SETTINGS_BY_KEY:
-                raise SettingsError(
-                    f"{source} gives a table for the single setting {dotted}"
-                )
-            written |= merge_settings(base, value, source=source, prefix=f"{dotted}.")
-            continue
-        if dotted not in SETTINGS_BY_KEY:
-            raise SettingsError(f"{source} sets an unknown setting: {dotted}")
-        base[dotted] = value
-        written.add(dotted)
-    return written
-
-
-def environment_settings(
-    environ: Mapping[str, str],
-) -> dict[str, tuple[str, str]]:
-    """Return the environment layer as ``key -> (raw value, variable name)``."""
-
-    values: dict[str, tuple[str, str]] = {}
-    for key in SETTINGS_BY_KEY:
-        name = f"{SETTINGS_ENVIRONMENT_PREFIX}{key.replace('.', '_').upper()}"
-        raw = environ.get(name)
-        if raw is None or not raw.strip():
-            # A variable that is unset, or set to nothing, is not a layer saying
-            # anything. Turning the cross-encoder off is therefore a file or a
-            # `--set` value rather than an empty variable.
-            continue
-        values[key] = (raw.strip(), name)
-    return values
-
-
-def override_settings(overrides: Sequence[str]) -> dict[str, str]:
-    """Return the ``--set`` layer, parsed as ``key=value`` pairs."""
-
-    values: dict[str, str] = {}
-    for item in overrides:
-        name, separator, value = str(item).partition("=")
-        if not separator:
-            raise SettingsError(f"--set needs key=value, got {item!r}")
-        key = name.strip()
-        if key not in SETTINGS_BY_KEY:
-            raise SettingsError(
-                f"--set names an unknown setting: {key}; the settings are "
-                + ", ".join(SETTINGS_BY_KEY.keys())
-            )
-        values[key] = value.strip()
-    return values
-
-
-def resolve_settings(
-    project_root: str | Path,
-    *,
-    config_path: str | Path | None = None,
-    overrides: Sequence[str] = (),
-    environ: Mapping[str, str] | None = None,
-) -> EffectiveSettings:
-    """Merge every layer, lowest precedence first, and report where each came from.
-
-    Nothing is read relative to the working directory: a client may start this
-    server anywhere, so the project layer is placed by ``project_root`` and the
-    user layer by the platform's config directory.
-    """
-
-    environment = os.environ if environ is None else environ
-    merged: dict[str, Any] = {}
-    provenance: dict[str, str] = {}
-
-    layers: list[tuple[str, Path]] = [(LAYER_DEFAULT, default_config_path())]
-    for name, path in (
-        (LAYER_USER, user_config_path()),
-        (LAYER_PROJECT, project_config_path(project_root)),
-    ):
-        if path.exists():
-            layers.append((name, path))
-    if config_path is not None:
-        layers.append((LAYER_FILE, Path(config_path).expanduser()))
-
-    for name, layer_path in layers:
-        document = read_config_document(layer_path, source=name)
-        written = merge_settings(merged, document, source=f"{name} ({layer_path})")
-        for key in written:
-            provenance[key] = f"{name} ({layer_path})"
-
-    for key, (raw, variable) in environment_settings(environment).items():
-        merged[key] = raw
-        provenance[key] = f"{LAYER_ENVIRONMENT} ({variable})"
-
-    for key, raw in override_settings(overrides).items():
-        merged[key] = raw
-        provenance[key] = LAYER_COMMAND_LINE
-
-    values: dict[str, Any] = {}
-    for key, setting in SETTINGS_BY_KEY.items():
-        if key not in merged:
-            raise SettingsError(
-                f"No value for {key}: the packaged default must declare every setting"
-            )
-        try:
-            values[setting.field] = setting.coerce(
-                merged[key], source=provenance.get(key, LAYER_DEFAULT)
-            )
-        except SettingsError as error:
-            raise SettingsError(
-                f"{key} from {provenance.get(key, LAYER_DEFAULT)}: {error}"
-            ) from error
-    return EffectiveSettings.from_values(values, provenance)
-
-
-def describe_settings(settings: EffectiveSettings) -> str:
-    """Render the effective settings, one line per key, with the layer that set it."""
-
-    lines = [
-        "Effective settings, later layers overriding earlier ones:",
-        "  default.toml < user config < project config < --config < environment < --set",
-    ]
-    width = max(len(setting.key) for setting in SETTINGS)
-    for section in SETTINGS_SECTIONS:
-        lines.append("")
-        lines.append(f"[{section}]")
-        for setting in SETTINGS:
-            if not setting.key.startswith(f"{section}."):
-                continue
-            value = getattr(settings, setting.field)
-            rendered = '""' if value == "" else repr(value)
-            if isinstance(value, str):
-                rendered = f'"{value}"'
-            lines.append(
-                f"  {setting.key:<{width}} = {rendered:<28} "
-                f"# {settings.provenance.get(setting.key, LAYER_DEFAULT)}"
-            )
-    return "\n".join(lines)

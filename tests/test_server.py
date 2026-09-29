@@ -1335,16 +1335,19 @@ def test_the_repetition_threshold_is_a_setting_not_a_rule(tmp_path: Path) -> Non
     turned off — it is not. The file changes the number and nothing else.
     """
 
-    from memory_ultra_rag_mcp.models import ModelError
-    from memory_ultra_rag_mcp.settings import resolve_settings
+    from config_ultra_rag_mcp import resolve_settings
 
-    assert resolve_settings(tmp_path, environ={}).duplicate_cosine == 0.99
-    assert (
-        resolve_settings(
-            tmp_path, environ={}, overrides=["retrieval.duplicate_cosine=0.2"]
-        ).duplicate_cosine
-        == 0.2
-    )
+    from memory_ultra_rag_mcp.models import ModelError
+    from memory_ultra_rag_mcp.settings import SETTINGS, sources_for
+
+    def resolved(**kwargs) -> float:
+        values, _provenance = resolve_settings(
+            SETTINGS, sources_for(tmp_path), environ={}, **kwargs
+        )
+        return values["duplicate_cosine"]
+
+    assert resolved() == 0.99
+    assert resolved(overrides=["retrieval.duplicate_cosine=0.2"]) == 0.2
 
     def record_second(case: str, second: str, duplicate_cosine: float) -> bool:
         """Record one statement after another, and report whether it was refused.

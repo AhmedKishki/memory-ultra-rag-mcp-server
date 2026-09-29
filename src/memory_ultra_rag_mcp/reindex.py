@@ -21,6 +21,8 @@ import json
 import sys
 from collections.abc import Sequence
 
+from config_ultra_rag_mcp import describe_settings
+
 from . import __version__
 from .config import (
     PROJECT_ROOT_ENV_VAR,
@@ -32,7 +34,7 @@ from .index import fts5_available
 from .maintenance import reindex as rebuild_scopes
 from .models import ModelError
 from .server import _local_retrieval
-from .settings import describe_settings
+from .settings import SETTINGS
 
 __all__ = ["main"]
 
@@ -214,7 +216,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 retrieval.worker_for(scope).stop()
 
     if arguments.print_config:
-        print(describe_settings(config.settings))
+        print(
+            describe_settings(
+                SETTINGS, config.settings.as_values(), config.settings_provenance
+            )
+        )
         return 0
     if arguments.export or arguments.export_to:
         for scope_directory, scope_report in zip(scopes, report["scopes"].values()):

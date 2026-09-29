@@ -32,6 +32,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
+from config_ultra_rag_mcp import describe_settings
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -55,7 +56,7 @@ from .models import (
     model_cache_directory,
 )
 from .retrieval import Retrieval, RetrievalSettings
-from .settings import EffectiveSettings, describe_settings
+from .settings import SETTINGS, EffectiveSettings
 from .store import (
     DEFAULT_KIND,
     StoreError,
@@ -561,7 +562,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if arguments.print_config:
         # Every setting in force, and where it came from, without serving a thing.
-        print(describe_settings(config.settings))
+        print(
+            describe_settings(
+                SETTINGS, config.settings.as_values(), config.settings_provenance
+            )
+        )
         return 0
     if arguments.ui_port is not None and not 1 <= arguments.ui_port <= 65535:
         print(f"{SERVER_NAME}: --ui-port must be between 1 and 65535", file=sys.stderr)

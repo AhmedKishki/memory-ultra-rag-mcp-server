@@ -146,6 +146,13 @@ Two things deliberately stay in code rather than in a file, and `AGENTS.md` says
 why: the record's schema version, and the names and paths that make up a scope,
 because those are what makes two UltraRAG servers agree on where a memory is.
 
+The stack that merges those layers — the registry type, the merge, the coercion
+every layer shares, the provenance, and the three path helpers — is the pinned
+[`config-ultra-rag-mcp`](https://github.com/AhmedKishki/config-ultra-rag-mcp)
+library, which the research server uses too. This server keeps its own keys, its
+own `default.toml`, its own `MEMORY_ULTRARAG_*` names, and its own account and
+project directories, so a change to one server's tunables never reaches the other.
+
 ## Browser view
 
 Memory is worth looking at, so the same memory the tools serve can be read — and, if you want, added to — in a browser on this machine. Two commands do it:
@@ -295,7 +302,9 @@ Recorded so an absence reads as a decision rather than an oversight, and so a la
 | 39 | A document from an older version is read and then removed, and one this server wrote is left alone | a memory of an earlier version exists as a file, so the file has to be read once for anything the record lacks — and then it is gone, because a scope holding both a document and a database is the state a user recognises as two versions of one thing. A rendering this server wrote is a different case: it was asked for, it is not a record, and `--retire-document` is how it is asked for again |
 
 | 40 | Every tunable is a declared setting, and a `config.toml` is an overlay rather than a replacement | a value written in two places is a value that will differ. So the registry in `settings.py` and the packaged `default.toml` are the two halves of one declaration, a layer may only set a key the registry declares, and every effective value reports the layer that supplied it. The user layer is the one that applies globally, because a memory is shared by every project on the account; the project layer is there for the project that differs |
+
 | 41 | A setting is declared as `identity`, `runtime`, or `retrieval` | the three cost different things when they change, and a flat list of names does not say that. An `identity` setting is written beside the statements it produced, so changing it means they are embedded again rather than compared across two spaces; a `retrieval` setting reorders the next answer and changes nothing about what is remembered. A config file that cannot say which of the two a number is would let someone set one and expect the other |
+| 42 | The layer stack is a pinned library rather than a second copy in this package | two servers in this collection were carrying the same nine functions, and the first copy refused the environment and `--set` layers because its coercion accepted only the types a TOML file produces. The stack is the same problem solved once: the registry, the merge, the coercion, the provenance, and the path helpers are shared behind a pinned commit, while the keys, the packaged `default.toml`, the environment names, and the two directory names stay here. Skew between this server's pin and the other server's is allowed, because a floating or vendored dependency is what would make one server's release depend on another's |
 
 ## Develop and test
 

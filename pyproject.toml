@@ -21,6 +21,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    # The layer stack behind the settings: the registry type, the merge, the
+    # coercion every layer shares, the provenance, and the path helpers. Pinned
+    # by commit, as the sibling repositories do, because two servers sharing it
+    # is the whole point and a floating version is not.
+    "config-ultra-rag-mcp @ git+https://github.com/AhmedKishki/config-ultra-rag-mcp.git@cbd47bb46efe85340de34f8f8f13fc6516e7fecb",
     # Local models, on CPU, run in process. The embedder is what makes a lookup
     # work without assuming the caller's wording; numpy is the exact vector scan
     # behind it, and is pinned explicitly rather than through onnxruntime.
@@ -53,6 +58,12 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# The default settings ship with the package: the code has no copy of them, and
+# `sources_for` reads this one file from beside `settings.py`. Without this the
+# built wheel has no defaults and the server refuses to start.
+memory_ultra_rag_mcp = ["default.toml"]
 
 [tool.uv]
 package = true

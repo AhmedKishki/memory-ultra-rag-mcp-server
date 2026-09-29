@@ -25,9 +25,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from config_ultra_rag_mcp import SettingsError, resolve_settings
 from platformdirs import user_data_path
 
-from .settings import EffectiveSettings, SettingsError, resolve_settings
+from .settings import SETTINGS, EffectiveSettings, sources_for
 
 __all__ = [
     "APP_NAME",
@@ -144,11 +145,15 @@ def resolve_config(
     storage.mkdir(parents=True, exist_ok=True)
 
     try:
-        settings = resolve_settings(
-            project, config_path=config_path, overrides=overrides
+        values, provenance = resolve_settings(
+            SETTINGS,
+            sources_for(project),
+            config_path=config_path,
+            overrides=overrides,
         )
     except SettingsError as error:
         raise ConfigurationError(str(error)) from error
+    settings = EffectiveSettings.from_values(values, provenance)
 
     return ServerConfig(
         project_root=project,
@@ -156,7 +161,7 @@ def resolve_config(
         storage_root=storage,
         global_directory=global_directory(storage),
         settings=settings,
-        settings_provenance=dict(settings.provenance),
+        settings_provenance=dict(provenance),
     )
 
 
