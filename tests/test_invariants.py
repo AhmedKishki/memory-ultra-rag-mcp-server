@@ -21,6 +21,8 @@ from fastmcp import Client
 from memory_ultra_rag_mcp import server
 from memory_ultra_rag_mcp.config import resolve_config
 from memory_ultra_rag_mcp.index import MemoryIndex
+from memory_ultra_rag_mcp.maintenance import EmbeddingWorker, PendingUnit, reindex
+from memory_ultra_rag_mcp.models import ModelError, ModelIdentity
 from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
 
 
@@ -190,8 +192,6 @@ def test_the_vectors_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:
     rebuild, it is a loss, and nothing here pretends otherwise.
     """
 
-    from memory_ultra_rag_mcp.maintenance import reindex
-
     config = _scope(tmp_path)
     directory = config.local_directory
     _populate(directory, statements=5)
@@ -217,3 +217,38 @@ def test_the_vectors_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:
     assert engine.answer(scope="local", directory=directory, query="draft", limit=10)[
         "returned"
     ]
+
+
+class _MissingModel:
+    """An embedder that cannot be fetched, so every call fails as a missing model."""
+
+    identity = ModelIdentity("embedding", "missing/model", 1)
+
+    def embed_documents(self, texts: list[str]) -> list[tuple[float, ...]]:
+        raise ModelError("the model is not available")
+
+    def embed_query(self, text: str) -> tuple[float, ...]:
+        raise ModelError("the model is not available")
+
+
+def test_a_worker_stops_even_while_its_model_is_missing(tmp_path: Path) -> None:
+    """A unit put back must not keep a stopped worker spinning.
+
+    The retry that leaves a statement pending is the one thing that can stop a
+    worker from reaching the end of its queue: without this the thread takes the
+    same unit out again every poll, `stop` waits out its whole timeout, and a
+    process that is shutting down — or a test suite that has leaked a worker —
+    keeps a thread burning a core forever.
+    """
+
+    worker = EmbeddingWorker(_MissingModel(), tmp_path / "scope")
+    worker.submit(PendingUnit("key", "a statement", "ITEM", "0"))
+    # Long enough to be unmistakable, short enough to fail loudly.
+    worker.drain(1.0)
+
+    started = time.monotonic()
+    worker.stop()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, f"stop waited {elapsed:.2f}s for a worker it cannot empty"
+    assert worker.pending == 0

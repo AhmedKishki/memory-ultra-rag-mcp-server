@@ -73,6 +73,11 @@ class EmbeddingWorker:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._idle = threading.Event()
+        # Set by `stop`, and read by the retry below. Without it a worker whose
+        # model is missing never reaches the `None` at the end of its queue: it
+        # puts the unit back and takes it out again, so `stop` waits out its whole
+        # timeout and leaves a thread spinning on the failure.
+        self._stopping = False
         self._idle.set()
 
     @property
@@ -87,6 +92,7 @@ class EmbeddingWorker:
         with self._lock:
             if self._thread is not None:
                 return
+            self._stopping = False
             self._thread = threading.Thread(
                 target=self._run, name="memory-embedding", daemon=True
             )
@@ -113,6 +119,7 @@ class EmbeddingWorker:
 
         if self._thread is None:
             return
+        self._stopping = True
         self._queue.put(None)
         self._thread.join(timeout=5.0)
         self._thread = None
@@ -137,7 +144,13 @@ class EmbeddingWorker:
             vectors = self._embedder.embed_documents([unit.text])
         except ModelError:
             # The model is not available. Put the unit back, stop pretending the
-            # queue is empty, and let a later write or a reindex retry it.
+            # queue is empty, and let a later write or a reindex retry it — unless
+            # the worker is stopping, because a unit put back behind the `None`
+            # at the end of the queue is one the thread would take out again and
+            # again, and `stop` would wait out its timeout and leave it spinning.
+            if self._stopping:
+                self._idle.set()
+                return
             self._queue.put(unit)
             self._idle.clear()
             return
