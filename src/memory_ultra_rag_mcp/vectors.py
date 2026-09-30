@@ -6,15 +6,15 @@ the FTS5 word index, the vector of every statement, and a statement's history.
 Keeping them together means one file to look at rather than three, one connection
 per read rather than two, and one schema version rather than two.
 
-What is still true of the parts: the word index is derived from the Markdown and
-is re-read whenever the document changes, while the vectors and the history are
-not derived from anything and survive that re-read. A file whose table is not the
-shape this version writes is dropped and rebuilt rather than half-read, which is
-also what retires the vectors of statements that have since been reworded.
+What is still true of the parts: the word index and the vectors are derived from
+the statements, so a rebuild restores them by embedding again, while the history
+is not derived from anything and survives one. A table whose shape this version
+does not write is dropped and rebuilt rather than half-read, which is also what
+retires the vectors of statements that have since been reworded.
 
-The record is still the Markdown. This file holds nothing that a re-read of the
-document cannot restore except those two, and a statement is never in this file's
-power to lose.
+The record is the table in that file, and these vectors are about the statements
+it holds: a vector with no statement behind it is not about anything that exists,
+and it is collected rather than left to grow.
 """
 
 from __future__ import annotations
@@ -280,26 +280,6 @@ class VectorStore:
         scored = [item for item in scored if item[1] >= floor or item[1] >= allowed]
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[: max(int(pool), 1)]
-
-    def knn(self, vector: Sequence[float], limit: int) -> list[tuple[str, float]]:
-        """Return the units nearest this vector, whatever they score.
-
-        `search` decides what a caller is willing to be handed; this decides what
-        is *there*, which is what a near-duplicate check needs: it is looking for
-        the closest thing the memory already holds, and the closest thing may be
-        far below any floor a read would use.
-        """
-
-        connection = self._open()
-        rows = connection.execute(
-            "SELECT unit_key, components FROM vector WHERE model = ? AND dimension = ?",
-            (self.model, self.dimension),
-        ).fetchall()
-        scored = [
-            (str(key), cosine_similarity(vector, _unpack(blob))) for key, blob in rows
-        ]
-        scored.sort(key=lambda item: item[1], reverse=True)
-        return scored[: max(int(limit), 1)]
 
 
 def _pack(values: Sequence[float]) -> bytes:

@@ -1,25 +1,23 @@
-from __future__ import annotations
-
-from pathlib import Path
-
 """``memory-ultra-rag-reindex``: bring a scope's derived state up to date.
 
-A read now keeps the word index in step with the Markdown itself, so a statement
-someone typed or edited by hand is answerable without this command. What it still
-does is work a read will not: force a full pass rather than one gated on a
-fingerprint, embed the vectors a read left pending, and rebuild a vector file that
-was deleted or left by another model.
+A read keeps the word index in step with the record itself, so a memory recovers
+from a document left by an older version on its own. What this command still does
+is work a read will not: settle a whole scope rather than what one query touches,
+embed the vectors a write left pending, and rebuild a vector table that was
+deleted or left by another model.
 
 ```bash
 uv run --frozen memory-ultra-rag-reindex --project-root /path/to/project
 ```
 """
 
+from __future__ import annotations
 
 import argparse
 import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from config_ultra_rag_mcp import describe_settings
 
@@ -61,14 +59,6 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "Where the global memory lives. Defaults to the environment, then "
             f"${STORAGE_ENV_VAR}, then this account's home data directory."
-        ),
-    )
-    parser.add_argument(
-        "--user",
-        default=None,
-        help=(
-            "Rebuild one named user's global memory too. Without it, only the "
-            "default one is rebuilt, which is the only one this server serves."
         ),
     )
     parser.add_argument(
@@ -181,11 +171,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
-    scopes = [config.local_directory]
-    if arguments.user:
-        scopes.append(config.global_directory / arguments.user)
-    else:
-        scopes.append(config.global_directory)
+    scopes = [config.local_directory, config.global_directory]
+
+    if arguments.print_config:
+        # Every setting in force, and where it came from, without rebuilding
+        # anything or fetching a model to do it.
+        print(
+            describe_settings(
+                SETTINGS, config.settings.as_values(), config.settings_provenance
+            )
+        )
+        return 0
 
     # The reindex embeds with the settings the read ranks with: a memory embedded
     # by one model and matched by another is a memory nobody can find anything in.
@@ -215,13 +211,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             for scope in scopes:
                 retrieval.worker_for(scope).stop()
 
-    if arguments.print_config:
-        print(
-            describe_settings(
-                SETTINGS, config.settings.as_values(), config.settings_provenance
-            )
-        )
-        return 0
     if arguments.export or arguments.export_to:
         for scope_directory, scope_report in zip(scopes, report["scopes"].values()):
             written = _export(scope_directory, arguments, len(scopes))

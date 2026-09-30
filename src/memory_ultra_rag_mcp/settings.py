@@ -138,7 +138,7 @@ SETTINGS: tuple[Setting, ...] = (
         "duplicate_cosine",
         float,
         "retrieval",
-        "How alike two statements may be before the second is refused.",
+        "How alike two statements may be before a read keeps only the better of them.",
         env="MEMORY_ULTRARAG_RETRIEVAL_DUPLICATE_COSINE",
         minimum=-1.0,
         maximum=2.0,

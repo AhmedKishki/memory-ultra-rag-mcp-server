@@ -283,9 +283,7 @@ class Retrieval:
         with MemoryIndex(directory) as index:
             adopted = index.adopt_document_if_empty()
             retired = index.retire_superseded()
-        queued = embed_pending(
-            directory, self.embedder, self.worker_for(directory), changed=None
-        )
+        queued = embed_pending(directory, self.embedder, self.worker_for(directory))
         return {
             "adopted": adopted,
             "superseded_removed": retired,

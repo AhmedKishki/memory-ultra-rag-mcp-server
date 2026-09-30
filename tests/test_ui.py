@@ -7,14 +7,17 @@ import socket
 from pathlib import Path
 
 import pytest
+from fakes import FakeEmbedder
 from fastmcp import Client
 from starlette.testclient import TestClient
 
 from memory_ultra_rag_mcp import ui
 from memory_ultra_rag_mcp.config import ServerConfig, resolve_config
 from memory_ultra_rag_mcp.index import MemoryIndex
+from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
 from memory_ultra_rag_mcp.server import create_server
 from memory_ultra_rag_mcp.store import read_document
+from memory_ultra_rag_mcp.vectors import VectorStore
 
 
 def _config(tmp_path: Path) -> ServerConfig:
@@ -158,6 +161,48 @@ def test_the_standing_document_is_written_only_when_it_still_matches(
             "Remember the thesis deadline."
         ]
     assert read_document(config.local_directory) is None
+
+
+def test_a_statement_the_page_saves_is_queued_for_a_vector(tmp_path: Path) -> None:
+    """The page and the tools share one retrieval, so a page write is not word-only.
+
+    A statement added in the browser is a statement a tool would have recorded, and
+    it needs a vector as much: without the queue it stays invisible to the meaning
+    side until somebody runs the reindex.
+    """
+
+    config = _config(tmp_path)
+    embedder = FakeEmbedder()
+    engine = Retrieval(
+        embedder=embedder,
+        policy=RetrievalSettings(embedding_model=embedder.identity.name),
+    )
+
+    async def scenario() -> tuple[int, int]:
+        async with Client(
+            create_server(config, retrieval=engine, warm=False)
+        ) as client:
+            adapter = ui.MemoryUIAdapter(config, client, engine)
+            saved = await adapter.call(
+                "memory_standing_save",
+                {
+                    "scope": "local",
+                    "content": "# MEMORY\nRemember the thesis deadline.\n",
+                },
+            )
+            engine.worker_for(config.local_directory).drain(5.0)
+            with VectorStore(
+                config.local_directory,
+                embedder.identity.name,
+                embedder.identity.dimension,
+            ) as store:
+                return int(saved["units_queued"]), store.count()
+
+    queued, held = asyncio.run(scenario())
+    engine.close()
+
+    assert queued == 1
+    assert held == 1
 
 
 def test_the_profile_asks_for_no_document_workspace(tmp_path: Path) -> None:

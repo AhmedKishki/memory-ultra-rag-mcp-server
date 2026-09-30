@@ -227,6 +227,8 @@ def merge_answers(
     )
     combined.units = kept[: max(int(limit), 1)]
     combined.collapsed = collapsed
+    # What each memory matched, before any repetition was collapsed out of the
+    # answer: a collapsed statement says which memory it was filed in.
     combined.scope_counts = {answer.scope: len(answer.units) for answer in answers}
     combined.truncated = any(answer.truncated for answer in answers) or (
         len(ranked) > max(int(limit), 1)
@@ -284,18 +286,6 @@ def _fuse(
         for found in (sides[key],)
     ]
     return fused
-
-
-def _position(units_by_key: dict[str, dict[str, str]], key: str) -> int:
-    """Return a statement's place in the document, or a large one if unknown."""
-
-    row = units_by_key.get(key)
-    if row is None:
-        return 10**6
-    try:
-        return int(row.get("stamp") or 0)
-    except (TypeError, ValueError):
-        return 10**6
 
 
 def _recency_ranks(
@@ -446,20 +436,23 @@ def answer_read(
         ordered = fused[: max(int(limit), 1)]
 
         if reranker is not None and len(ordered) > 1:
-            candidates = [
-                units_by_key[key]["text"]
-                for key, _, _, _ in ordered
-                if key in units_by_key
+            # The candidates and the ordered list are built in one pass and filtered
+            # the same way, so a score is never paired with a statement it was not
+            # computed for.
+            paired = [
+                (item, units_by_key[item[0]]["text"])
+                for item in ordered
+                if item[0] in units_by_key
             ]
-            if candidates:
-                scores = reranker.score(query, candidates)
-                paired = [
+            if paired:
+                texts = [text for _item, text in paired]
+                scores = reranker.score(query, texts)
+                ranked_pairs = [
                     (item, score)
-                    for item, score in zip(ordered, scores, strict=False)
-                    if item[0] in units_by_key
+                    for (item, _text), score in zip(paired, scores, strict=False)
                 ]
-                paired.sort(key=lambda entry: entry[1], reverse=True)
-                ordered = [item for item, _ in paired]
+                ranked_pairs.sort(key=lambda entry: entry[1], reverse=True)
+                ordered = [item for item, _score in ranked_pairs]
                 answer.reranked = True
 
         # What was recalled has been recalled, whichever side found it. The count

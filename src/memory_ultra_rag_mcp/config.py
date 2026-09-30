@@ -131,6 +131,10 @@ def resolve_config(
     The settings are resolved from the same project, so the project's own
     ``config.toml`` is the layer that applies to it and the account's is the layer
     that applies everywhere.
+
+    Nothing is created here. Both directories are made when a memory is first
+    touched, so resolving a configuration — which is what ``--print-config`` does —
+    writes nothing at all.
     """
     project = Path(project_root).expanduser().resolve()
     if not project.is_dir():
@@ -141,8 +145,6 @@ def resolve_config(
 
     storage = _selected_storage_root(storage_root)
     local = project / LOCAL_STATE_DIRNAME
-    local.mkdir(parents=True, exist_ok=True)
-    storage.mkdir(parents=True, exist_ok=True)
 
     try:
         values, provenance = resolve_settings(

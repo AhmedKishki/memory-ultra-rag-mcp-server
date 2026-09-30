@@ -106,9 +106,10 @@ one category. The usual ones:
   PREFERENCE  what the user likes or wants
   CORRECTION  something to stop doing
 
-Any other word is accepted and nothing here interprets it. The same word should
-be used for the same kind of thing. A kind that is not in the list is filed as
-ITEM, which is a kind like any other: a recall filtered by ITEM finds it.
+Any other word is accepted and nothing here interprets it, so a kind of your own
+is filed under that word rather than under ITEM. The same word should be used for
+the same kind of thing. ITEM is the kind a statement gets when none is named, and
+it is a kind like any other: a recall filtered by ITEM finds those statements.
 
 A kind is a column of the record rather than part of a statement's words, so a
 query that names a kind finds nothing. Pass it as `kind` instead.

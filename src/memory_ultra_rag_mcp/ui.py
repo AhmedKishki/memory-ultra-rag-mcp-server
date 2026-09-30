@@ -55,6 +55,7 @@ from .config import (
     resolve_config,
 )
 from .index import MemoryIndex
+from .maintenance import embed_pending
 from .retrieval import Retrieval
 from .server import create_server
 from .store import EXPORT_FILENAME, StoreError, parse_document
@@ -140,18 +141,6 @@ MEMORY_UI_PROFILE = UIProfile(
 )
 
 
-def version_label() -> str:
-    """Return the header label, naming both distributions the page runs on."""
-    parts = [f"{APP_NAME} {__version__}"]
-    try:
-        ui_version = _distribution_version(UI_DISTRIBUTION_NAME)
-    except PackageNotFoundError:  # the UI package is not installed
-        ui_version = None
-    if ui_version is not None:
-        parts.append(f"UI {ui_version}")
-    return " · ".join(parts)
-
-
 def require_global_scope(scope: str) -> str:
     """Return the scope if it is the one global scope, and refuse any other.
 
@@ -192,10 +181,10 @@ class MemoryUIAdapter:
     ) -> None:
         self.config = config
         self.client = client
-        # The page and the tools share one retrieval, so a round the page records
-        # keeps the derived state in step exactly as a statement the tool records
-        # does. Without it a page write would be invisible to the semantic side
-        # until a reindex.
+        # The page and the tools share one retrieval, so a statement the page saves
+        # keeps the derived state in step exactly as one a tool records does.
+        # Without it a page write would be invisible to the semantic side until a
+        # reindex.
         self.retrieval = retrieval
 
     async def health(self) -> Mapping[str, Any]:
@@ -331,15 +320,15 @@ class MemoryUIAdapter:
     async def memory_append(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         """Refuse the page's round write, because this memory records statements.
 
-        A statement is recorded through ``set_memory_local`` or
-        ``set_memory_global``, and an exchange is not a statement. The page's
-        standing-document editor still writes, and that is the one write it has.
+        A statement is recorded through ``record_memory``, and an exchange is not
+        a statement. The page's standing-document editor still writes, and that is
+        the one write it has.
         """
 
         del arguments
         raise UIRequestError(
             "This memory records statements, not dated exchanges. Edit the standing "
-            "document to add to it, or use set_memory_local / set_memory_global.",
+            "document to add to it, or use record_memory with a scope.",
             status_code=409,
         )
 
@@ -365,10 +354,21 @@ class MemoryUIAdapter:
                 )
             report = index.replace_all(parse_document(content))
             digest = index.export_digest()
+        # A statement the page added or reworded needs a vector as much as one a
+        # tool recorded, so the same queue takes them; without a retrieval in this
+        # process there is nothing to embed with, and a reindex settles it.
+        queued = 0
+        if self.retrieval is not None:
+            queued = embed_pending(
+                directory,
+                self.retrieval.embedder,
+                self.retrieval.worker_for(directory),
+            )
         return {
             "status": "saved",
             "scope": arguments.get("scope"),
             "sha256": digest,
+            "units_queued": queued,
             **report,
         }
 

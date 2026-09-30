@@ -1,4 +1,4 @@
-"""One scope's memory, as a table, with the document written out beside it.
+"""One scope's memory, as a table, and the rendering of it written on request.
 
 ``memory.sqlite3`` is the record. Every statement is a row in ``unit``: its text,
 the kind it was filed under, its place in the document, and the four things a
@@ -7,15 +7,15 @@ when it was last recalled. The same table is the FTS5 word index, so a statement
 is stored once and found by words without a second copy to keep in step.
 
 ``MEMORY.md`` is an **export** of that record: the same statements as plain prose,
-newest first, regenerated whenever the memory changes and on a reindex. It exists
-to be read, diffed, and carried, and it is not read as an input — a hand edit to
-it is overwritten by the next export and the read that notices says so, rather
-than leaving an edit that looks as though it worked.
+newest first, written when something asks for it — ``--export``, or the page on
+every request — and never in passing. It exists to be read, diffed, and carried,
+and it is not read as an input: a hand edit to it is disclosed rather than
+adopted, and the statement it added is taken into the record instead.
 
 The vectors are in the same file, keyed by the same statement digest, and are the
 one derived part a rebuild cannot restore cheaply: they cost one embedding each.
-A file whose table is not the shape this version writes is dropped and rebuilt
-rather than half-read.
+A table whose shape this version does not write is dropped and rebuilt rather than
+half-read.
 """
 
 from __future__ import annotations
@@ -176,6 +176,18 @@ def read_unit_rows(path: Path) -> list[tuple[str, ...]] | None:
         connection.close()
 
 
+def _last_position(connection: sqlite3.Connection) -> int:
+    """Return the last place this record gives a statement, or -1 when it holds none."""
+
+    row = connection.execute("SELECT max(CAST(stamp AS INTEGER)) FROM unit").fetchone()
+    if row is None or row[0] is None:
+        return -1
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return -1
+
+
 def _now() -> str:
     """Return the current time, as text a person can read and a string can order.
 
@@ -232,6 +244,9 @@ class MemoryIndex:
         #: opened after the upgrade. Disclosed, because a file vanishing from a
         #: memory is not something a caller should have to notice on its own.
         self.retired: list[str] = []
+        #: Vectors copied out of a version-4 vector file by the last upgrade, and
+        #: zero when there was none to copy.
+        self.migrated_vectors: int = 0
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -247,6 +262,7 @@ class MemoryIndex:
         if not legacy.is_file():
             return 0
         moved = 0
+        read = False
         try:
             connection.execute("ATTACH DATABASE ? AS legacy", (str(legacy),))
             exists = connection.execute(
@@ -254,6 +270,7 @@ class MemoryIndex:
                 "WHERE type = 'table' AND name = 'vector'"
             ).fetchone()
             if exists and int(exists[0] or 0):
+                read = True
                 present = {
                     str(row[1])
                     for row in connection.execute("PRAGMA legacy.table_info(vector)")
@@ -282,9 +299,11 @@ class MemoryIndex:
                     )
             connection.commit()
         except sqlite3.DatabaseError:
-            # A file this version cannot read is not worth failing a read over: it
-            # is left where it is and the vectors are simply rebuilt.
-            pass
+            # A file this version cannot read is not worth failing a read over, and
+            # it is not worth deleting either: it holds the only copy of embeddings
+            # this version cannot rebuild itself. It stays where it is, and the
+            # vectors are simply built again.
+            read = False
         finally:
             try:
                 connection.execute("DETACH DATABASE legacy")
@@ -292,8 +311,9 @@ class MemoryIndex:
                 pass
         if moved:
             self.migrated_vectors = moved
-        for suffix in ("", "-wal", "-shm"):
-            Path(f"{legacy}{suffix}").unlink(missing_ok=True)
+        if read:
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{legacy}{suffix}").unlink(missing_ok=True)
         return moved
 
     def retire_superseded(self, *, render: bool = False) -> list[str]:
@@ -316,21 +336,28 @@ class MemoryIndex:
 
         connection = self._open()
         known = self.unit_keys()
+        held = {statement.text for statement in self.statements()}
         retired: list[str] = []
-        for name in (*SUPERSEDED_FILENAMES, RENDERED_FILENAME):
+        # The vector file is not here: `_adopt_legacy_vectors` owns it, copies what
+        # it can read out of it, and removes it only when it could. A file this
+        # version cannot read is left where it is on either path.
+        for name in (SUPERSEDED_FILENAMES[0], RENDERED_FILENAME):
             path = self.scope_directory / name
             if not path.is_file():
                 continue
             rows = self._readable_rows(path)
             if rows is None:
                 continue
-            held = {statement.text for statement in self.statements()}
             missing = [
                 row for row in rows if row[0] not in held and row[1] not in known
             ]
             if missing:
                 self._adopt_legacy_unit(connection, missing)
+                # What this file held is now the record's, so the next file is
+                # compared against the record as it now stands rather than as it
+                # stood before this one was read.
                 held = held | {row[0] for row in missing}
+                known = known | {row[1] for row in missing}
             if name == RENDERED_FILENAME and not missing and not render:
                 # A rendering the record already agrees with is what somebody asked
                 # for, so it stays until they ask for it to go.
@@ -370,11 +397,6 @@ class MemoryIndex:
                 (statement.text, statement.key, statement.kind, str(statement.position))
                 for statement in parse_document(text)
             ]
-        if path.name == SUPERSEDED_FILENAMES[1]:
-            # A vector file holds vectors and no words, so it can supply none of
-            # the record's statements; its rows are copied by `_adopt_legacy_vectors`
-            # and there is nothing here to import.
-            return []
         rows = read_unit_rows(path)
         if rows is None:
             return None
@@ -404,13 +426,16 @@ class MemoryIndex:
     def _open(self) -> sqlite3.Connection:
         if self._connection is not None:
             return self._connection
-        self.scope_directory.mkdir(parents=True, exist_ok=True)
+        connection: sqlite3.Connection | None = None
         try:
+            self.scope_directory.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self.path)
             connection.execute("PRAGMA journal_mode=WAL")
             self._create_schema(connection)
             self._connection = connection
-        except sqlite3.Error as error:
+        except (OSError, sqlite3.Error) as error:
+            if connection is not None:
+                connection.close()
             raise IndexError(
                 f"the search index at {self.path} could not be opened: {error}. "
                 "This server needs a SQLite built with FTS5; delete the file to "
@@ -531,11 +556,27 @@ class MemoryIndex:
         because an export holds the statements and nothing else. The kinds, the
         dates, and the counts come back with the words; a file that had no history
         columns gets an empty one, which is the truth about it.
+
+        Identity is checked here rather than by ``INSERT OR IGNORE``, because the
+        table this writes into is an FTS5 virtual table and has no constraint to
+        ignore against: a statement the record already holds, or one the file holds
+        twice, would arrive as a second row of the same statement.
+
+        Statements read beside a record that already holds some are placed below the
+        record's own, in the order the file listed them, because the record cannot
+        place them and the file's own positions would put two of them at the same
+        place in the document. A file read into an empty record keeps its positions,
+        which is the one case where they are the only ordering there is.
         """
 
         moved = 0
+        known = {str(row[0]) for row in connection.execute("SELECT unit_key FROM unit")}
+        placed = _last_position(connection) + 1 if known else None
         for row in rows:
             text, key, kind, stamp = row[0], row[1], row[2], row[3]
+            if key in known:
+                continue
+            known.add(key)
             history = row[4:]
             connection.execute(
                 "INSERT OR IGNORE INTO unit"
@@ -545,13 +586,15 @@ class MemoryIndex:
                     text,
                     key,
                     kind,
-                    stamp,
+                    str(placed) if placed is not None else stamp,
                     normalise(text),
                     history[0] if len(history) > 0 and history[0] else None,
                     int(history[1]) if len(history) > 1 and history[1] else 0,
                     history[2] if len(history) > 2 and history[2] else None,
                 ),
             )
+            if placed is not None:
+                placed += 1
             moved += 1
         return moved
 
@@ -779,20 +822,6 @@ class MemoryIndex:
         connection.commit()
         return len(stale)
 
-    def _renumber(self) -> None:
-        """Rewrite every position from the rows' current order, newest first."""
-
-        connection = self._open()
-        rows = connection.execute(
-            "SELECT unit_key FROM unit ORDER BY CAST(stamp AS INTEGER)"
-        ).fetchall()
-        for position, (key,) in enumerate(rows):
-            connection.execute(
-                "UPDATE unit SET stamp = ? WHERE unit_key = ?",
-                (str(position), str(key)),
-            )
-        connection.commit()
-
     def export_digest(self) -> str:
         """Return the digest of this record rendered as a document.
 
@@ -818,12 +847,21 @@ class MemoryIndex:
         that kept the document as the record, read once and then written back out
         by the first export. It is not a hand edit, because it runs only when the
         record has nothing in it.
+
+        A statement the file holds twice is imported once. The table has no
+        constraint to ignore against, so the check is here: a memory that answers
+        one question twice is a memory nobody can be sure of, and a file written by
+        hand is the place that duplication comes from.
         """
 
         if connection.execute("SELECT count(*) FROM unit").fetchone()[0]:
             return False
         adopted = False
+        seen: set[str] = set()
         for parsed in parse_document(document):
+            if parsed.key in seen:
+                continue
+            seen.add(parsed.key)
             connection.execute(
                 "INSERT OR IGNORE INTO unit"
                 "(text, unit_key, kind, stamp, normalized, added_at, recalls, "

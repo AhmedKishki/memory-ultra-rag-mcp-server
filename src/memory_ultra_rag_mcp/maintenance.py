@@ -2,21 +2,20 @@
 
 Three rules, in the order they happen:
 
-1. **Durability first.** The statement or the exchange is in the Markdown before
-   anything here runs, so nothing in this module can lose a memory.
-2. **No work proportional to the memory.** Recording a statement re-parses the
-   standing document, which is small and curated by design; recording an exchange
-   re-parses the one dated file it was appended to. Neither walks the rest of
-   the memory, and neither embeds more than the units that are actually new.
+1. **Durability first.** The statement is a row in the record before anything here
+   runs, so nothing in this module can lose a memory.
+2. **No work proportional to the memory.** What is asked about is which statements
+   the vector table is missing, which is a set difference over keys rather than a
+   pass over the memory.
 3. **A write never fails because of the lookup layer.** If the model is
    unavailable the units are left pending, the write says so, and the next write
    or an explicit reindex picks them up.
 
 This is also where the deliberate trade is made explicit. Maintaining the index
 here rather than on the read path is what keeps a lookup O(1) in the number of
-files; the cost is that a file edited in place, behind our back, is not noticed
-by a read. :func:`reindex` exists for that, and a read reports when the index
-may be behind rather than pretending otherwise.
+statements; the cost is that the vector side trails a write whose model was not
+available, and a read reports that it is behind rather than pretending otherwise.
+:func:`reindex` exists for that.
 """
 
 from __future__ import annotations
@@ -185,27 +184,29 @@ def embed_pending(
     scope_directory: Path,
     embedder: Embedder,
     worker: EmbeddingWorker | None,
-    *,
-    changed: Path | None = None,
 ) -> int:
     """Queue the statements of a scope that have no vector, and return how many.
 
     The record is the table, so there is nothing to sync first and nothing to
-    narrow: what is asked about is which statements the vector file is missing,
-    which is a set difference over keys and not a pass over the scope's files.
+    narrow: what is asked about is which statements the vector table is missing,
+    which is a set difference over keys and not a pass over the memory.
+
+    The statements are read through the one connection that is open for this
+    scope, so a scope with a thousand pending units is opened once rather than
+    once per unit.
     """
 
     identity = embedder.identity
     with MemoryIndex(scope_directory) as index:
         units = index.unit_keys()
-    with VectorStore(scope_directory, identity.name, identity.dimension) as store:
-        have = store.has(units)
-    missing = units - have
-    if worker is None:
+        with VectorStore(scope_directory, identity.name, identity.dimension) as store:
+            have = store.has(units)
+        missing = units - have
+        if worker is None:
+            return len(missing)
+        for key in missing:
+            worker.submit(_pending(index, key))
         return len(missing)
-    for key in missing:
-        worker.submit(_pending(index, key))
-    return len(missing)
 
 
 def reindex(

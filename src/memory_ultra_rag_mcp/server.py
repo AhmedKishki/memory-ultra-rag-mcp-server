@@ -9,10 +9,10 @@ live and therefore who can see them.
 * **local memory** belongs to the project this server is bound to and lives inside
   that repository, under ``.memory-rag``, so it travels with the project.
 
-The surface is seven tools, named by what they do and which kind of memory they
-touch: **set** records one statement, **get** answers a question about what was
-remembered, **forget** removes one statement, and **set_memory_handoff** replaces
-this project's previous handoff. The only decision an agent makes is which kind of
+The surface is four tools, named by what they do: **record_memory** records one
+statement, **recall_memory** answers a question about what was remembered,
+**forget_memory** removes one statement, and **record_handoff** replaces this
+project's previous handoff. The only decision an agent makes is which kind of
 memory it is writing — this project's or the account's — because that is the one
 thing that decides who can read it.
 
@@ -403,41 +403,6 @@ def _handed_off(
     try:
         return engine.handoff(config.local_directory, content)
     except ModelError as error:
-        raise ToolError(str(error)) from error
-
-
-def _answer(
-    engine: Retrieval,
-    scope: str,
-    directory: Path,
-    query: str,
-    limit: int,
-    kind: str | None = None,
-) -> dict[str, Any]:
-    """Answer one read, and refuse the one question a read must not answer.
-
-    An empty query is refused rather than answered with everything, because a
-    memory grows and handing one to a model whole spends the context window on it.
-    The answer also reports when the document was rewritten from the record, which
-    is how a hand edit to an export is disclosed rather than quietly lost.
-    """
-
-    if not str(query or "").strip():
-        raise ToolError(
-            "query must not be empty: this server answers a question about a "
-            "memory rather than returning one whole, because a memory grows by "
-            "appending and reading it all would spend the context window on it"
-        )
-    capped = max(1, min(int(limit), MAX_RESULT_LIMIT))
-    try:
-        return engine.answer(
-            scope=scope,
-            directory=directory,
-            query=str(query),
-            limit=capped,
-            kind=kind,
-        )
-    except (IndexError, StoreError) as error:
         raise ToolError(str(error)) from error
 
 

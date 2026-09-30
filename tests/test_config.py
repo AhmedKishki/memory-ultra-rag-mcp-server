@@ -16,6 +16,7 @@ from memory_ultra_rag_mcp.config import (
     global_directory,
     resolve_config,
 )
+from memory_ultra_rag_mcp.index import MemoryIndex
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +37,11 @@ def test_local_memory_lives_inside_the_repository(tmp_path: Path) -> None:
     resolved = resolve_config(project_root=project)
 
     assert resolved.local_directory == project / LOCAL_STATE_DIRNAME
+    # Resolving a configuration creates nothing, which is what `--print-config`
+    # promises; the directory is made when a memory is first touched.
+    assert not resolved.local_directory.exists()
+    with MemoryIndex(resolved.local_directory) as index:
+        index.insert("a fact", "NOTE")
     assert resolved.local_directory.is_dir()
 
 

@@ -8,6 +8,7 @@ with the record loses.
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 
@@ -401,6 +402,93 @@ def test_one_past_the_limit_is_how_the_index_says_there_was_more(
     # The search asks for one row past the limit, so the caller can say whether
     # the answer was the whole match or a selection of it.
     assert len(found) == 3
+
+
+def test_a_document_holding_one_statement_twice_stores_it_once(tmp_path: Path) -> None:
+    """A file written by hand repeats itself, and a repeat is not two statements.
+
+    ``unit`` is an FTS5 table, which has no constraint for ``INSERT OR IGNORE`` to
+    ignore against, so the check has to be made while the statements are read in.
+    """
+
+    scope = _scope(tmp_path)
+    (scope / EXPORT_FILENAME).write_text(
+        "# MEMORY\n\nprefers tabs over spaces\n\nprefers tabs over spaces\n",
+        encoding="utf-8",
+    )
+
+    with MemoryIndex(scope) as index:
+        assert index.adopt_document_if_empty() == 1
+        assert index.count_units() == 1
+        assert index.export().count("prefers tabs over spaces") == 1
+
+
+def test_a_vector_file_this_version_cannot_read_is_left_where_it_is(
+    tmp_path: Path,
+) -> None:
+    """An unreadable file is not deleted on a guess: it holds the only copies.
+
+    A version-4 vector file holds embeddings this version cannot rebuild itself,
+    and the upgrade that cannot read it is exactly the case where removing it
+    would destroy them.
+    """
+
+    scope = _scope(tmp_path)
+    legacy = scope / "index-vectors.sqlite3"
+    connection = sqlite3.connect(legacy)
+    connection.execute("CREATE TABLE something_else(x INTEGER)")
+    connection.commit()
+    connection.close()
+
+    with MemoryIndex(scope) as index:
+        index.insert("a fact", "NOTE")
+
+    assert legacy.is_file()
+
+
+def test_a_vector_file_this_version_can_read_is_removed(tmp_path: Path) -> None:
+    """The upgrade still does what it is for: copy the vectors, then let it go."""
+
+    scope = _scope(tmp_path)
+    legacy = scope / "index-vectors.sqlite3"
+    connection = sqlite3.connect(legacy)
+    connection.execute(
+        "CREATE TABLE vector(unit_key TEXT, stamp TEXT, kind TEXT, model TEXT, "
+        "dimension INTEGER, components BLOB)"
+    )
+    connection.execute(
+        "INSERT INTO vector VALUES ('key', '0', 'NOTE', 'fake/model', 4, ?)",
+        (sqlite3.Binary(b"\x00\x00\x00\x00" * 4),),
+    )
+    connection.commit()
+    connection.close()
+
+    with MemoryIndex(scope) as index:
+        index.insert("a fact", "NOTE")
+        moved = index.migrated_vectors
+
+    assert moved == 1
+    assert not legacy.exists()
+
+
+def test_a_retired_file_does_not_import_a_statement_the_record_already_holds(
+    tmp_path: Path,
+) -> None:
+    """Two files holding one statement import it once, and the second file's is
+    recognised as already held rather than arriving as a second row."""
+
+    scope = _scope(tmp_path)
+    _add(scope, "the same words in both files", "NOTE")
+    (scope / EXPORT_FILENAME).write_text(
+        "# MEMORY\n\nthe same words in both files\n\nonly the document knows this\n",
+        encoding="utf-8",
+    )
+
+    with MemoryIndex(scope) as index:
+        assert index.retire_superseded() == [EXPORT_FILENAME]
+        texts = [item.text for item in index.statements()]
+
+    assert texts == ["the same words in both files", "only the document knows this"]
 
 
 def test_a_search_falls_back_when_the_conjunction_is_too_strict(

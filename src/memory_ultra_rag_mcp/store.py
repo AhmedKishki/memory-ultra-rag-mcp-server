@@ -169,28 +169,12 @@ class Statement:
     added_at: str | None = None
     recalls: int = 0
     last_recalled_at: str | None = None
-    labelled: bool = True
 
     @property
     def normalized(self) -> str:
         """Return the text as an exact match compares it."""
 
         return normalise(self.text)
-
-
-def _strip_type(text: str, kind: str) -> str:
-    """Return a statement without a type a file put in front of it.
-
-    A file written by an older version holds ``RULE: the statement``. When such a
-    file is imported the prefix becomes the row's type and is not repeated, and a
-    statement that opens with a colon and a capitalised word is a sentence of its
-    own and is left alone.
-    """
-
-    match = _LEGACY_KIND_PATTERN.match(text)
-    if match is not None and match.group(1) == kind:
-        return text[match.end() :].strip()
-    return text
 
 
 def parse_document(
@@ -238,7 +222,6 @@ def parse_document(
                 text=body,
                 key=unit_key(f"{label}: {body}"),
                 position=len(found) if newest_first else -1,
-                labelled=match is not None,
             )
         )
     if newest_first is None:
