@@ -417,9 +417,7 @@ def _local_retrieval(settings: EffectiveSettings | None) -> Retrieval:
     policy = RetrievalSettings.from_settings(settings)
     cache = model_cache_directory(settings.cache_root()) if settings else None
     embedder = LocalEmbedder(policy.embedding_model, cache)
-    reranker = (
-        LocalReranker(policy.reranker_model, cache) if policy.reranker_model else None
-    )
+    reranker = LocalReranker(policy.reranker_model, cache)
     return Retrieval(embedder=embedder, policy=policy, reranker=reranker)
 
 

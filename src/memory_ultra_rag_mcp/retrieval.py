@@ -83,17 +83,20 @@ class RetrievalSettings:
     #: every unit is text the caller has to read.
     pool_depth: int = 50
 
-    #: A local cross-encoder to order the fused candidates with, or None for off.
-    #: On by default: a memory's units are one line each, where a bi-encoder's
-    #: vector is weakest, and a cross-encoder reads the pair rather than either
-    #: side alone. Measured on this machine at 54 ms for ten candidates, which is
-    #: what sets :attr:`rerank_depth`. No document here may claim it is more
-    #: accurate: that is unmeasured, and the first thing to measure.
-    reranker_model: str | None = "Xenova/ms-marco-MiniLM-L-6-v2"
+    #: The local cross-encoder that orders the fused candidates. Every read is
+    #: reranked: a memory's units are one line each, where a bi-encoder's vector
+    #: is weakest, and a cross-encoder reads the pair rather than either side
+    #: alone. Measured on this machine at 54 ms for ten candidates, which is what
+    #: sets :attr:`rerank_depth`. No document here may claim it is more accurate:
+    #: that is unmeasured, and the first thing to measure. It is not optional, so
+    #: there is no setting that switches it off and no empty value for one.
+    reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
 
     #: How many fused candidates the reranker sees, so its cost is bounded even
     #: if the pool grows. Ten, because the read's own ceiling is 250 ms and the
-    #: cross-encoder costs about 5 ms a candidate on this machine.
+    #: cross-encoder costs about 5 ms a candidate on this machine. It bounds the
+    #: cost and never the ranking: at 1 every read is reranked on its best
+    #: candidate, which changes the answer and not only its cost.
     rerank_depth: int = 10
 
     #: What a warm read may cost, asserted by a test so a later change cannot
@@ -122,6 +125,16 @@ class RetrievalSettings:
 
         if settings is None:
             return cls(embedding_model=DEFAULT_EMBEDDING_MODEL)
+        if not str(settings.reranker_model or "").strip():
+            # Every read is reranked, so a policy with no cross-encoder is not a
+            # policy this server can serve. The layer machinery lets an empty
+            # string through for every string setting, so the one value that would
+            # switch the reranker off is refused here, by name, before serving.
+            raise ModelError(
+                "dense.reranker_model must name one of the pinned rerankers, and "
+                "there is no empty value: every read is reranked. Name one in "
+                "config.toml, or leave the setting out to take the packaged default."
+            )
         return cls(
             embedding_model=settings.embedding_model,
             cosine_floor=settings.cosine_floor,
@@ -132,7 +145,7 @@ class RetrievalSettings:
             recency_bonus=settings.recency_bonus,
             duplicate_cosine=settings.duplicate_cosine,
             pool_depth=settings.pool_depth,
-            reranker_model=settings.reranker_model or None,
+            reranker_model=settings.reranker_model,
             rerank_depth=settings.rerank_depth,
         )
 
@@ -148,7 +161,7 @@ class RetrievalSettings:
             "rrf_k": self.rrf_k,
             "recency_bonus": self.recency_bonus,
             "pool_depth": self.pool_depth,
-            "reranker_model": self.reranker_model or "off",
+            "reranker_model": self.reranker_model,
             "rerank_depth": self.rerank_depth,
             "read_ceiling_ms": self.read_ceiling_ms,
         }
@@ -239,19 +252,20 @@ class Retrieval:
         except StoreError as error:
             raise ModelError(str(error)) from error
         with MemoryIndex(directory) as index:
-            key, replaced = index.insert(statement, label, replace_kind=replace_kind)
-        queued = embed_pending(directory, self.embedder, self.worker_for(directory))
-        return {
+            _key, replaced = index.insert(statement, label, replace_kind=replace_kind)
+        embed_pending(directory, self.embedder, self.worker_for(directory))
+        # What a write answers with is what it filed: the statement, the kind it
+        # was filed under, and anything it removed to file it. The rest is
+        # bookkeeping — the digest that identifies the statement, the directory it
+        # went to, the model, the queue — and a caller can act on none of it.
+        recorded: dict[str, Any] = {
             "status": "recorded",
             "kind": label,
             "text": statement,
-            "key": key,
-            "replaced": replaced,
-            "directory": str(directory),
-            "embedding_model": self.policy.embedding_model,
-            "units_queued": queued,
-            "embedded": queued == 0,
         }
+        if replaced:
+            recorded["replaced"] = replaced
+        return recorded
 
     def handoff(self, directory: Path, content: str) -> dict[str, Any]:
         """Put this session's handoff at the top, replacing the last one.
@@ -359,9 +373,6 @@ class Retrieval:
             duplicate_cosine=self.policy.duplicate_cosine,
         )
         payload = merged.payload()
-        payload.pop("scope", None)
-        payload["scopes"] = list(directories)
-        payload["scope_counts"] = merged.scope_counts
         return payload
 
     def forget(
@@ -418,14 +429,16 @@ class Retrieval:
             index.drop(removed.statement.key)
         identity = self.embedder.identity
         with VectorStore(removed.directory, identity.name, identity.dimension) as store:
-            vectors = store.forget([removed.statement.key])
-        return {
+            store.forget([removed.statement.key])
+        # What a forget answers with is what it removed, and how often the memory
+        # had been handing it back: a caller that kept a count has to be able to
+        # see what that count was. The keys and the directory are bookkeeping.
+        forgotten: dict[str, Any] = {
             "status": "forgotten",
-            "forgotten": 1,
             "scope": removed.scope,
             "kind": removed.statement.kind,
             "text": removed.statement.text,
-            "recalls_removed": removed.statement.recalls,
-            "vectors_removed": vectors,
-            "directory": str(removed.directory),
         }
+        if removed.statement.recalls:
+            forgotten["recalls_removed"] = removed.statement.recalls
+        return forgotten

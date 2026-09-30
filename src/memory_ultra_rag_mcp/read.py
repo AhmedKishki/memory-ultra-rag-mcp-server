@@ -32,7 +32,6 @@ Three properties are decisions rather than details:
 
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,40 +56,46 @@ class Answer:
     scope: str
     query: str
     units: list[dict[str, Any]] = field(default_factory=list)
-    matched_by: str = "lexical"
     semantic_available: bool = False
     units_pending: int = 0
     truncated: bool = False
-    reranked: bool = False
     superseded_removed: list[str] = field(default_factory=list)
-    scope_counts: dict[str, int] | None = None
     hint: str | None = None
-    elapsed_ms: float = 0.0
-    #: The record's own key and vector for each unit, in the same order as
-    #: `units`. A recall that collapses a repetition has to compare statements it
-    #: did not fetch for this read, so the two travel with the answer rather than
-    #: being looked up again; neither is part of what the caller is told.
+    #: The record's own key, vector, and place for each unit, in the same order as
+    #: `units`. A recall that merges two memories has to rank statements it did not
+    #: fetch for this read and compare statements it read from another memory, so
+    #: these travel with the answer rather than being looked up again; none of them
+    #: is part of what the caller is told.
     unit_keys: list[str] = field(default_factory=list)
     unit_vectors: list[tuple[float, ...]] = field(default_factory=list)
+    unit_scores: list[float] = field(default_factory=list)
+    unit_stamps: list[int] = field(default_factory=list)
     #: What the read collapsed, and by which test, so a caller that is told three
     #: statements came back knows two of them said the same thing.
     collapsed: list[dict[str, Any]] = field(default_factory=list)
 
     def payload(self) -> dict[str, Any]:
-        """Return the object a read answers with."""
+        """Return the object a read answers with.
 
-        answer: dict[str, Any] = {
-            "scope": self.scope,
-            "query": self.query,
-            "matched_by": self.matched_by,
-            "units": self.units,
-            "returned": len(self.units),
-            "truncated": self.truncated,
-            "semantic_available": self.semantic_available,
-            "units_pending": self.units_pending,
-            "reranked": self.reranked,
-            "elapsed_ms": round(self.elapsed_ms, 2),
-        }
+        An answer carries a field when the field has news, and nothing else. The
+        statements are the answer; every other field is either a fact the caller
+        asked for by asking (``truncated`` says the list is a selection), a
+        condition the caller has to act on (``units_pending``,
+        ``semantic_available``), or a disclosure the caller could not otherwise
+        account for (``superseded_removed``, ``collapsed_repetitions``). What a
+        read leaves out is what it computed and the caller cannot use: the scores
+        that ordered it, the side each statement was found by, how long it took,
+        the position a statement holds in the document, and counts a caller can
+        count for itself.
+        """
+
+        answer: dict[str, Any] = {"units": self.units}
+        if self.truncated:
+            answer["truncated"] = True
+        if self.units_pending:
+            answer["units_pending"] = self.units_pending
+        if not self.semantic_available:
+            answer["semantic_available"] = False
         if self.superseded_removed:
             answer["superseded_removed"] = self.superseded_removed
         if self.collapsed:
@@ -197,7 +202,6 @@ def merge_answers(
     matched best is the one the caller is shown.
     """
 
-    started = time.perf_counter()
     combined = Answer(scope="both", query=answers[0].query if answers else "")
     ranked: list[
         tuple[float, int, str, str, tuple[float, ...] | None, dict[str, Any]]
@@ -206,13 +210,26 @@ def merge_answers(
         vectors = dict(zip(answer.unit_keys, answer.unit_vectors, strict=False))
         for position, unit in enumerate(answer.units):
             # Every statement names the memory it came from: a caller quoting one
-            # has to say which, and that is a fact about the answer.
+            # has to say which, and that is a fact about the answer. The ranking
+            # travels beside the answer rather than inside it, in the lists parallel
+            # to `units`, so the merged answer can order two memories together
+            # without a caller ever seeing a score.
             stated = {"scope": answer.scope, **unit}
             key = answer.unit_keys[position] if position < len(answer.unit_keys) else ""
+            score = (
+                answer.unit_scores[position]
+                if position < len(answer.unit_scores)
+                else 0.0
+            )
+            stamp = (
+                answer.unit_stamps[position]
+                if position < len(answer.unit_stamps)
+                else 0
+            )
             ranked.append(
                 (
-                    float(unit.get("score") or 0.0),
-                    int(unit.get("stamp") or 0),
+                    float(score),
+                    int(stamp),
                     key,
                     str(unit.get("text") or ""),
                     vectors.get(key),
@@ -227,9 +244,6 @@ def merge_answers(
     )
     combined.units = kept[: max(int(limit), 1)]
     combined.collapsed = collapsed
-    # What each memory matched, before any repetition was collapsed out of the
-    # answer: a collapsed statement says which memory it was filed in.
-    combined.scope_counts = {answer.scope: len(answer.units) for answer in answers}
     combined.truncated = any(answer.truncated for answer in answers) or (
         len(ranked) > max(int(limit), 1)
     )
@@ -237,15 +251,7 @@ def merge_answers(
     combined.superseded_removed = [
         name for answer in answers for name in answer.superseded_removed
     ]
-    combined.reranked = any(answer.reranked for answer in answers)
     combined.semantic_available = all(answer.semantic_available for answer in answers)
-    matched = {answer.matched_by for answer in answers}
-    if "both" in matched:
-        combined.matched_by = "both"
-    elif "semantic" in matched:
-        combined.matched_by = "semantic"
-    else:
-        combined.matched_by = "lexical"
     if not combined.units:
         combined.hint = (
             "no statement matched those words, in this project or on the account. "
@@ -256,7 +262,6 @@ def merge_answers(
             "available: only the exact words would have found anything. Try other "
             "words."
         )
-    combined.elapsed_ms = (time.perf_counter() - started) * 1000.0
     return combined
 
 
@@ -333,24 +338,26 @@ def _recency(rank: int | None, policy: RetrievalSettings) -> float:
 def _stated(row: dict[str, str], facts: dict[str, Any]) -> dict[str, Any]:
     """Return one statement as the caller is told about it.
 
-    The text is the statement without its type, because a caller that recorded a
-    statement wants the statement back rather than the label it filed it under;
-    the type is a field of its own, so a query that found a statement by its type
-    can be told which type it was. ``stamp`` is the position the document records
-    it at, which is how a caller sees that an answer came from the newest end.
+    Four facts an agent acts on: the words, the kind they were filed under, which
+    memory holds them, and how often the memory has handed them back. The date is
+    there only when the statement has one, and the position the document records it
+    at is left out, because an answer is ordered and the order already says it.
+
+    Every other fact the record keeps about a statement is bookkeeping this answer
+    does not carry: the digests that identify it, the vectors that found it, the
+    side that matched it, and the scores that put it where it is. A caller cannot
+    act on any of them, and a statement's own words are what a caller reads.
     """
 
-    # The type is a field of its own, so the text is the statement and nothing
-    # else: a caller that recorded something gets back the words they recorded.
-    statement = row.get("text", "")
-    return {
-        "text": statement,
+    stated: dict[str, Any] = {
+        "text": row.get("text", ""),
         "kind": row.get("kind"),
-        "stamp": row.get("stamp"),
-        "added_at": facts.get("added_at") or None,
         "recalls": int(facts.get("recalls") or 0),
-        "last_recalled_at": facts.get("last_recalled_at"),
     }
+    added_at = facts.get("added_at")
+    if added_at:
+        stated["added_at"] = added_at
+    return stated
 
 
 def answer_read(
@@ -372,7 +379,6 @@ def answer_read(
     one ``UPDATE`` per unit returned, not a rewrite of anything.
     """
 
-    started = time.perf_counter()
     answer = Answer(scope=scope, query=query)
 
     lexical: list[tuple[str, int]] = []
@@ -436,24 +442,25 @@ def answer_read(
         ordered = fused[: max(int(limit), 1)]
 
         if reranker is not None and len(ordered) > 1:
-            # The candidates and the ordered list are built in one pass and filtered
-            # the same way, so a score is never paired with a statement it was not
-            # computed for.
-            paired = [
-                (item, units_by_key[item[0]]["text"])
-                for item in ordered
-                if item[0] in units_by_key
+            # The cross-encoder reads `rerank_depth` of the candidates and no more,
+            # which bounds what a read costs without touching the ranking: the
+            # candidates it does not read keep their fused order below the ones it
+            # does. Candidates and scores are built in one pass, so a score is never
+            # paired with a statement it was not computed for.
+            depth = max(1, int(policy.rerank_depth))
+            rankable = [item for item in ordered if item[0] in units_by_key]
+            candidates = [
+                (item, units_by_key[item[0]]["text"]) for item in rankable[:depth]
             ]
-            if paired:
-                texts = [text for _item, text in paired]
+            if candidates:
+                texts = [text for _item, text in candidates]
                 scores = reranker.score(query, texts)
                 ranked_pairs = [
                     (item, score)
-                    for (item, _text), score in zip(paired, scores, strict=False)
+                    for (item, _text), score in zip(candidates, scores, strict=False)
                 ]
                 ranked_pairs.sort(key=lambda entry: entry[1], reverse=True)
-                ordered = [item for item, _score in ranked_pairs]
-                answer.reranked = True
+                ordered = [item for item, _score in ranked_pairs] + rankable[depth:]
 
         # What was recalled has been recalled, whichever side found it. The count
         # is one update per unit answered, on the connection this read already
@@ -481,15 +488,22 @@ def answer_read(
 
         answer.units = [
             {
+                "scope": answer.scope,
                 **_stated(units_by_key[key], history.get(key, {})),
-                "matched_by": side,
-                "score": round(score, 6),
             }
-            for key, score, side, _both in ordered
+            for key, _score, _side, _both in ordered
             if key in units_by_key
         ]
         answer.unit_keys = [
             key for key, _score, _side, _both in ordered if key in units_by_key
+        ]
+        answer.unit_scores = [
+            score for key, score, _side, _both in ordered if key in units_by_key
+        ]
+        answer.unit_stamps = [
+            int(units_by_key[key].get("stamp") or 0)
+            for key, _score, _side, _both in ordered
+            if key in units_by_key
         ]
         # The vectors of the statements this read is holding, so a recall that
         # merges two memories can compare a statement from one against a statement
@@ -498,12 +512,6 @@ def answer_read(
             with VectorStore(directory, identity.name, identity.dimension) as store:
                 held = store.vectors_for(answer.unit_keys)
             answer.unit_vectors = [held.get(key, ()) for key in answer.unit_keys]
-        if semantic and not lexical:
-            answer.matched_by = "semantic"
-        elif lexical and semantic:
-            answer.matched_by = "both"
-        else:
-            answer.matched_by = "lexical"
     if not answer.units:
         # An answer with nothing in it is where an agent decides whether to try
         # again, so it says what to try rather than leaving the guidance in a
@@ -515,7 +523,6 @@ def answer_read(
             else "no statement matched those words, and only the words were "
             "searched: the meaning side was not available. Try other words."
         )
-    answer.elapsed_ms = (time.perf_counter() - started) * 1000.0
     return answer
 
 

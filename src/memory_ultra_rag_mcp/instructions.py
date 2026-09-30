@@ -92,9 +92,9 @@ record_handoff(content)
     one. Always this project's memory.
 
 Every answer that returns statements gives each one with its scope, its kind, its
-text, when it was added, and how many times it has been recalled. A statement
-that has never come up and one that comes up constantly are not equally worth
-keeping.
+text, the date it was added where it has one, and how many times it has been
+recalled. A statement that has never come up and one that comes up constantly are
+not equally worth keeping.
 
 KINDS
 
@@ -123,12 +123,23 @@ whether it is reading today's or last week's.
 
 WHAT ELSE AN ANSWER TELLS YOU
 
-  hint                present only when nothing matched, and says what to try
-  units_pending       statements findable by words whose vector is not ready
-  superseded_removed  a file an earlier version left was read for anything it held
-                      that the memory did not have, and then removed
-  semantic_available  false when only the words were searched, so only the exact
-                      words would have found anything
+An answer carries a field only when the field has news. Every statement comes
+back with its words, its kind, the memory it is in, and how often that memory
+has handed it over; a statement with a date carries the date. Beyond that:
+
+  hint                 present only when nothing matched, and says what to try
+  truncated            present only when more matched than you were shown
+  units_pending        statements findable by words whose vector is not ready
+  semantic_available   present only as false, when only the words were searched,
+                       so only the exact words would have found anything
+  superseded_removed   a file an earlier version left was read for anything it
+                       held that the memory did not have, and then removed
+  collapsed_repetitions a statement that said the same thing, and which test
+                       caught it
+
+Nothing else is in an answer: no score, no timing, no position in the document,
+and no count a caller could make for itself. An answer is what was remembered,
+ordered.
 
 Nothing here is a transcript. What a recall returns is the record of what was
 remembered, so quote it as it was recorded and let the user decide which

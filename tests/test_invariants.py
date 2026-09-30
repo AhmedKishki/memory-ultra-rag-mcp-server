@@ -24,6 +24,7 @@ from memory_ultra_rag_mcp.index import MemoryIndex
 from memory_ultra_rag_mcp.maintenance import EmbeddingWorker, PendingUnit, reindex
 from memory_ultra_rag_mcp.models import ModelError, ModelIdentity
 from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
+from memory_ultra_rag_mcp.vectors import VectorStore
 
 
 def _data(result: Any) -> Any:
@@ -102,12 +103,16 @@ def test_a_read_stays_inside_its_latency_ceiling(tmp_path: Path) -> None:
     engine.worker_for(directory).drain(5.0)
 
     engine.answer(scope="local", directory=directory, query="draft", limit=10)
+    # The bound is on the read itself: the tool does not publish its own timing,
+    # because nothing an agent can do follows from how many milliseconds it took.
+    started = time.perf_counter()
     answer = engine.answer(
         scope="local", directory=directory, query="the draft", limit=10
     )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
 
-    assert answer["elapsed_ms"] > 0
-    assert answer["elapsed_ms"] <= engine.policy.read_ceiling_ms
+    assert answer["units"]
+    assert 0 < elapsed_ms <= engine.policy.read_ceiling_ms
 
 
 def test_the_ceiling_is_asserted_against_a_fake_reranker_and_says_so() -> None:
@@ -146,8 +151,18 @@ def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
     # The statement is durable now; the vector is the worker's problem.
     with MemoryIndex(config.local_directory) as index:
         assert [item.text for item in index.statements()] == ["a fact"]
-    assert recorded["units_queued"] == 1
-    assert recorded["embedded"] is False
+    # The answer says what was filed and nothing about the vector queue: the queue
+    # is the server's own work, and the fact it left is visible in the record.
+    assert recorded == {
+        "scope": "local",
+        "status": "recorded",
+        "kind": "NOTE",
+        "text": "a fact",
+    }
+    with VectorStore(
+        config.local_directory, embedder.identity.name, embedder.identity.dimension
+    ) as store:
+        assert store.count() == 0
     engine.worker_for(config.local_directory).drain(5.0)
     # What gets embedded is the statement alone. The type is a column now rather
     # than a prefix in the text, so it is not part of the vector: a query for a
@@ -197,7 +212,7 @@ def test_the_vectors_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:
     engine.maintain(directory)
     engine.worker_for(directory).drain(5.0)
     assert engine.answer(scope="local", directory=directory, query="draft", limit=10)[
-        "returned"
+        "units"
     ]
 
     with MemoryIndex(directory) as index:
@@ -207,13 +222,15 @@ def test_the_vectors_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:
     after_wipe = engine.answer(
         scope="local", directory=directory, query="draft", limit=10
     )
-    assert after_wipe["returned"] > 0
+    assert after_wipe["units"]
+    # The one condition a read still discloses: a statement whose vector is gone is
+    # findable by its words alone until the reindex puts it back.
     assert after_wipe["units_pending"] > 0
 
     reindex([directory], engine.embedder)
     engine.worker_for(directory).drain(10.0)
     assert engine.answer(scope="local", directory=directory, query="draft", limit=10)[
-        "returned"
+        "units"
     ]
 
 

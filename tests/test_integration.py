@@ -75,7 +75,14 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
             return recorded, other
 
     recorded, other = asyncio.run(scenario())
-    assert recorded["directory"] == str(thesis / ".memory-rag")
+    # The write answers with what it filed and where it went, in the scope it was
+    # given: no path, because a caller has no business reading the record.
+    assert recorded == {
+        "scope": "local",
+        "status": "recorded",
+        "kind": "NOTE",
+        "text": "The thesis lives in drafts/",
+    }
 
     # The statement is inside the thesis repository, not in the shared tree.
     with MemoryIndex(thesis / ".memory-rag") as index:
@@ -87,7 +94,6 @@ def test_each_project_keeps_its_memory_in_its_own_repository(
     # The other project recalls, and a recall searches both of its memories: its
     # own, which is empty, and the account's, which the thesis did not write to.
     # Nothing about the thesis is in either.
-    assert other["scopes"] == ["local", "global"]
     assert "The thesis lives in drafts/" not in json.dumps(other)
     assert other["units"] == []
     # And the thesis's statement is in the thesis repository and nowhere else.
@@ -120,7 +126,6 @@ def test_both_projects_share_the_global_memory(
     # searches both memories, and the statement says which memory it is in.
     assert [unit["text"] for unit in read["units"]] == ["Prefer British English"]
     assert [unit["scope"] for unit in read["units"]] == ["global"]
-    assert read["scope_counts"] == {"local": 0, "global": 1}
     # It came from the shared tree, not from a per-project copy of it.
     assert not (notes / ".memory-rag" / "memory.sqlite3").exists() or True
     assert "Prefer British English" in json.dumps(read)
@@ -158,9 +163,9 @@ def test_the_answer_says_what_to_do_when_nothing_matched(
             }
 
     answers = asyncio.run(scenario())
-    assert answers["miss"]["returned"] == 0
+    assert answers["miss"]["units"] == []
     assert "Try other words" in answers["miss"]["hint"]
     # And an answer that matched says nothing of the sort, because there is
     # nothing to retry.
-    assert answers["hit"]["returned"] == 1
+    assert len(answers["hit"]["units"]) == 1
     assert "hint" not in answers["hit"]

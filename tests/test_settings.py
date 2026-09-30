@@ -178,14 +178,29 @@ def test_a_value_out_of_bounds_is_refused_by_name(tmp_path: Path) -> None:
         _resolve(tmp_path, overrides=["retrieval.cosine_floor=4"], **EMPTY)
 
 
-def test_a_model_setting_accepts_an_empty_string_because_it_means_something(
-    tmp_path: Path,
-) -> None:
-    """Turning the cross-encoder off is a value, not a missing one."""
+def test_a_reranker_model_must_name_one_of_the_pinned_models(tmp_path: Path) -> None:
+    """The reranker is not optional, so its value cannot be a name or nothing."""
+
+    with pytest.raises(SettingsError, match="must be one of"):
+        _resolve(tmp_path, overrides=["dense.reranker_model=not-a-model"], **EMPTY)
+
+
+def test_a_read_refuses_a_reranker_setting_that_names_nothing(tmp_path: Path) -> None:
+    """An empty string reaches the policy as a value, and the policy refuses it.
+
+    The layer machinery lets an empty string through for every string setting,
+    because for most of them it means "unset". Here it would mean a read that
+    answers without the cross-encoder, which is not a read this server serves.
+    """
+
+    from memory_ultra_rag_mcp.models import ModelError
+    from memory_ultra_rag_mcp.retrieval import RetrievalSettings
 
     settings = _resolve(tmp_path, overrides=["dense.reranker_model="], **EMPTY)
 
     assert settings.reranker_model == ""
+    with pytest.raises(ModelError, match="every read is reranked"):
+        RetrievalSettings.from_settings(settings)
 
 
 def test_a_set_without_a_value_is_refused(tmp_path: Path) -> None:
@@ -235,13 +250,16 @@ def test_the_policy_the_settings_produce_is_the_read_policy(tmp_path: Path) -> N
 
     settings = _resolve(
         tmp_path,
-        overrides=["retrieval.rerank_depth=3", "dense.reranker_model="],
+        overrides=[
+            "retrieval.rerank_depth=3",
+            "dense.reranker_model=BAAI/bge-reranker-base",
+        ],
         **EMPTY,
     )
     policy = RetrievalSettings.from_settings(settings)
 
     assert policy.rerank_depth == 3
-    assert policy.reranker_model is None
+    assert policy.reranker_model == "BAAI/bge-reranker-base"
     assert policy.embedding_model == settings.embedding_model
     # And with no settings at all, the fallback is the same policy the file
     # declares, so a caller that skips the files does not quietly get a

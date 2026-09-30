@@ -257,7 +257,7 @@ def test_a_document_is_recovered_by_an_empty_record(tmp_path: Path) -> None:
     finally:
         engine.close()
 
-    assert answer["returned"] == 1
+    assert len(answer["units"]) == 1
     assert answer["units"][0]["kind"] == "PLAN"
     # A file this server did not write is read and removed; one it did is left.
     assert (scope / "MEMORY.md").is_file()
@@ -287,7 +287,7 @@ def test_a_document_left_beside_the_record_is_read_and_then_removed(
 
         # The record answered for what it held, the document's own statement was
         # kept rather than dropped, and the file is gone.
-        assert answer["returned"] == 1
+        assert len(answer["units"]) == 1
         assert statements == ["a recorded fact", "something a person typed by hand"]
         assert "MEMORY.md" in answer["superseded_removed"]
         assert not (tmp_path / "MEMORY.md").exists()
@@ -334,8 +334,9 @@ def test_a_statement_written_by_hand_is_not_dated(tmp_path: Path) -> None:
         unit for unit in answer["units"] if "typed by a person" in unit["text"]
     )
     # Undated, and therefore given no preference for being new, which is the honest
-    # answer rather than a guess about when a person wrote it.
-    assert typed["added_at"] is None
+    # answer rather than a guess about when a person wrote it: a statement with no
+    # date carries no date field at all.
+    assert "added_at" not in typed
     assert typed["recalls"] == 1
     assert typed["kind"] == "NOTE"
 

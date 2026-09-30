@@ -58,8 +58,10 @@ recency_bonus = 0.1
 # only a statement that is the same sentence twice.
 duplicate_cosine = 0.99
 # How many candidates each side contributes before fusion, and how many of the
-# fused candidates the cross-encoder sees. These are internal depths rather than
-# the answer: a read returns exactly the `limit` the caller asked for.
+# fused candidates the cross-encoder reads. These are internal depths rather than
+# the answer: a read returns exactly the `limit` the caller asked for, and
+# `rerank_depth` of 1 reranks on the single best candidate rather than skipping
+# the reranker.
 pool_depth = 50
 rerank_depth = 10
 
@@ -68,8 +70,9 @@ rerank_depth = 10
 # different models are different spaces, so changing this means the statements
 # are embedded again; `memory-ultra-rag-reindex` does that. (identity.)
 embedding_model = "BAAI/bge-small-en-v1.5"
-# A local cross-encoder to order the fused candidates with, or "" for none. A
-# memory's statements are one line each, where a bi-encoder's vector is weakest
-# and a cross-encoder reads the pair rather than either side alone. It costs about
-# 5 ms a candidate, which is what bounds `retrieval.rerank_depth`.
+# The local cross-encoder that orders every read's candidates. A memory's
+# statements are one line each, where a bi-encoder's vector is weakest and a
+# cross-encoder reads the pair rather than either side alone. It costs about
+# 5 ms a candidate, which is what bounds `retrieval.rerank_depth`. Every read is
+# reranked: there is no empty value that turns this off.
 reranker_model = "Xenova/ms-marco-MiniLM-L-6-v2"

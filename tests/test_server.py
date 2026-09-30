@@ -22,6 +22,7 @@ from memory_ultra_rag_mcp import server
 from memory_ultra_rag_mcp.config import resolve_config
 from memory_ultra_rag_mcp.index import MemoryIndex
 from memory_ultra_rag_mcp.retrieval import Retrieval, RetrievalSettings
+from memory_ultra_rag_mcp.vectors import VectorStore
 
 
 def _rendered(scope: Path) -> str:
@@ -171,8 +172,6 @@ def test_a_recall_searches_both_memories_and_ranks_them_together(
 
     answer = asyncio.run(scenario())
     assert {unit["scope"] for unit in answer["units"]} == {"local", "global"}
-    assert answer["scope_counts"] == {"local": 1, "global": 1}
-    assert answer["scopes"] == ["local", "global"]
     assert engine is not None
 
 
@@ -223,9 +222,18 @@ def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
     assert not (config.local_directory / "project").exists()
     assert not list(config.local_directory.glob("*.md"))
     # The write is durable and the vector is queued, not computed on this thread.
-    assert recorded["embedded"] is False
-    assert recorded["units_queued"] == 1
-    assert recorded["embedding_model"] == "fake/model"
+    # The answer says what it filed: the queue and the model are the server's own
+    # work and no caller acts on either.
+    assert recorded == {
+        "scope": "local",
+        "status": "recorded",
+        "kind": "NOTE",
+        "text": "The draft lives in docs/",
+    }
+    with VectorStore(
+        config.local_directory, embedder.identity.name, embedder.identity.dimension
+    ) as store:
+        assert store.count() == 0
 
 
 def test_a_statement_is_embedded_off_the_calling_thread(tmp_path: Path) -> None:
@@ -252,7 +260,7 @@ def test_a_statement_is_embedded_off_the_calling_thread(tmp_path: Path) -> None:
     # What gets embedded is the statement itself. The type is a column of the
     # record rather than a prefix in the text, so it is not part of the vector.
     assert "a fact" in embedder.documents
-    assert outcome["read"]["returned"] == 1
+    assert len(outcome["read"]["units"]) == 1
 
 
 def test_a_write_survives_a_model_that_cannot_be_loaded(tmp_path: Path) -> None:
@@ -270,15 +278,20 @@ def test_a_write_survives_a_model_that_cannot_be_loaded(tmp_path: Path) -> None:
                     "record_memory", {"content": "a fact", "kind": "note"}
                 )
             )
-            drained = _engine(config, embedder)
-            return recorded | {
-                "pending": drained.worker_for(config.local_directory).pending
-            }
+            read = _data(
+                await client.call_tool(
+                    "recall_memory", {"query": "a fact"}, raise_on_error=False
+                )
+            )
+            return recorded | {"read": read}
 
     outcome = asyncio.run(scenario())
     assert outcome["status"] == "recorded"
     assert _statements(config.local_directory) == ["a fact"]
-    assert outcome["embedded"] is False
+    # The vector is still missing, so the read is the surface that discloses it,
+    # exactly as it discloses that the meaning side was unavailable.
+    assert outcome["read"]["units_pending"] == 1
+    assert outcome["read"]["semantic_available"] is False
 
 
 def test_a_global_statement_is_written_under_the_storage_root(tmp_path: Path) -> None:
@@ -301,10 +314,57 @@ def test_a_global_statement_is_written_under_the_storage_root(tmp_path: Path) ->
             return recorded | {"read": read}
 
     outcome = asyncio.run(scenario())
-    assert outcome["directory"] == str(config.global_directory)
     assert config.global_directory == config.storage_root / "memory" / "default"
     assert "always cite the commit" in outcome["read"]["units"][0]["text"]
     assert not (config.global_directory / "MEMORY.md").exists()
+
+
+def test_an_answer_carries_only_what_the_caller_can_act_on(tmp_path: Path) -> None:
+    """A field is here because it has news, not because this read had one.
+
+    Every tool answer is a fixed set of keys or a conditional one, so a new field
+    cannot be added without a test saying why a caller needs it. The scoring, the
+    timing, the side a statement was found by and the position it holds in the
+    document are all computed here and none of them is in the answer.
+    """
+
+    config = _config(tmp_path)
+    embedder = FakeEmbedder()
+    engine = _engine(config, embedder)
+    app = server.create_server(config, retrieval=engine, warm=False)
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            recorded = _data(
+                await client.call_tool(
+                    "record_memory",
+                    {"content": "always cite the commit", "kind": "RULE"},
+                    raise_on_error=True,
+                )
+            )
+            engine.worker_for(config.local_directory).drain(5.0)
+            read = _data(
+                await client.call_tool(
+                    "recall_memory", {"query": "cite"}, raise_on_error=True
+                )
+            )
+            return {"recorded": recorded, "read": read}
+
+    outcome = asyncio.run(scenario())
+
+    assert list(outcome["recorded"]) == ["scope", "status", "kind", "text"]
+    assert list(outcome["read"]) == ["units"]
+    assert list(outcome["read"]["units"][0]) == [
+        "scope",
+        "text",
+        "kind",
+        "recalls",
+        "added_at",
+    ]
+    # The two conditions a read does disclose, and only when they hold: the
+    # statement above was embedded, so neither field is in the answer.
+    assert "units_pending" not in outcome["read"]
+    assert "semantic_available" not in outcome["read"]
 
 
 def test_a_read_answers_a_question_not_a_file(tmp_path: Path) -> None:
@@ -336,7 +396,8 @@ def test_a_read_answers_a_question_not_a_file(tmp_path: Path) -> None:
     for unit in read["units"]:
         assert unit["kind"]
         assert unit["text"]
-        assert unit["stamp"] is not None
+        assert unit["scope"]
+        assert isinstance(unit["recalls"], int)
 
 
 def test_a_read_finds_a_statement_by_meaning_alone(tmp_path: Path) -> None:
@@ -359,12 +420,20 @@ def test_a_read_finds_a_statement_by_meaning_alone(tmp_path: Path) -> None:
             )
 
     read = asyncio.run(scenario())
-    assert read["semantic_available"] is True
-    assert [unit["text"] for unit in read["units"]] == [
-        "the third draft lives in drafts/"
-    ]
-    assert read["matched_by"] == "semantic"
-    assert read["units"][0]["matched_by"] == "semantic"
+    # A read says nothing about which side answered, because a caller cannot act
+    # on that; what it withholds is the condition it must disclose. One statement
+    # with four facts, and nothing else anywhere in the answer.
+    assert list(read) == ["units"]
+    assert len(read["units"]) == 1
+    unit = read["units"][0]
+    assert list(unit) == ["scope", "text", "kind", "recalls", "added_at"]
+    assert (unit["scope"], unit["text"], unit["kind"]) == (
+        "local",
+        "the third draft lives in drafts/",
+        "NOTE",
+    )
+    assert unit["recalls"] == 1
+    assert unit["added_at"]
 
 
 def test_a_read_that_needs_no_meaning_says_which_side_answered(tmp_path: Path) -> None:
@@ -383,7 +452,6 @@ def test_a_read_that_needs_no_meaning_says_which_side_answered(tmp_path: Path) -
             return _data(await client.call_tool("recall_memory", {"query": "cite"}))
 
     read = asyncio.run(scenario())
-    assert read["matched_by"] in {"lexical", "both"}
     assert "always cite the commit" in json.dumps(read)
 
 
@@ -434,9 +502,9 @@ def test_a_read_is_capped_and_says_so(tmp_path: Path) -> None:
             )
 
     everything, capped = asyncio.run(scenario())
-    assert everything["returned"] == 5
-    assert everything["truncated"] is False
-    assert capped["returned"] == 2
+    assert len(everything["units"]) == 5
+    assert "truncated" not in everything
+    assert len(capped["units"]) == 2
     assert capped["truncated"] is True
 
 
@@ -800,9 +868,9 @@ def test_a_reranker_orders_the_answer_when_it_is_switched_on(tmp_path: Path) -> 
             )
 
     read = asyncio.run(scenario())
-    assert read["reranked"] is True
-    # The words match both statements, and the reranker's scores put the one
-    # holding more of the query first. Ordering only: both still come back.
+    # The words match both statements, and the cross-encoder's scores put the one
+    # holding more of the query first. Ordering is the whole claim: an answer says
+    # nothing about having been reranked, because every read is.
     assert [unit["text"] for unit in read["units"]] == [
         "the draft lives beside the sources it was written from",
         "the draft is a plan, and the plan is not a promise",
@@ -841,8 +909,14 @@ def test_a_failing_model_is_reported_and_the_write_still_lands(tmp_path: Path) -
             )
 
     recorded = asyncio.run(scenario())
-    assert recorded["status"] == "recorded"
-    assert recorded["embedded"] is False
+    # A write that cannot embed still answers with what it filed: the model
+    # failing is the server's problem, and the next read is what discloses it.
+    assert recorded == {
+        "scope": "global",
+        "status": "recorded",
+        "kind": "RULE",
+        "text": "a rule",
+    }
     assert "a rule" in _rendered(config.global_directory)
 
 
@@ -871,7 +945,9 @@ def test_a_handoff_replaces_the_previous_one(tmp_path: Path) -> None:
             return first, second
 
     first, second = asyncio.run(scenario())
-    assert first["replaced"] == 0
+    # Nothing was replaced the first time, and an answer carries no count of zero;
+    # the second replaced one, and that is news the caller acts on.
+    assert "replaced" not in first
     assert second["replaced"] == 1
     assert second["kind"] == "HANDOFF"
 
@@ -942,7 +1018,7 @@ def test_forgetting_removes_exactly_the_statement_named(tmp_path: Path) -> None:
             )
 
     forgotten = asyncio.run(scenario())
-    assert forgotten["forgotten"] == 1
+    assert forgotten["status"] == "forgotten"
     assert forgotten["kind"] == "NOTE"
     assert forgotten["text"] == "the draft lives in docs/"
 
@@ -1055,7 +1131,6 @@ def test_a_read_reports_when_a_statement_was_added_and_how_often_it_was_recalled
     # The read that is answering you has already counted itself, so the count is
     # "how many times this has been handed over", not "before this call".
     assert first[0]["recalls"] == 1
-    assert first[0]["last_recalled_at"]
     assert second[0]["recalls"] == 2
 
 
@@ -1187,9 +1262,9 @@ def test_a_zero_recency_bonus_answers_on_the_match_alone(tmp_path: Path) -> None
     assert len(units) > 1
     # With no preference the answer is the fused order, which is the reranker and
     # the two sides, and the scores are the ones they produced.
-    assert [unit["score"] for unit in units] == sorted(
-        (unit["score"] for unit in units), reverse=True
-    )
+    # An answer is ordered and says nothing else about the order: no score, no
+    # side, no position. What the agent reads is the sequence.
+    assert len(units) == 6
 
 
 def test_the_preference_is_among_the_statements_that_matched(tmp_path: Path) -> None:
@@ -1307,7 +1382,7 @@ def test_a_repetition_is_recorded_and_the_read_shows_it_once(tmp_path: Path) -> 
     assert repeated["status"] == "recorded"
     assert len(statements) == 2
     # And a read shows one of them, and says the other said the same thing.
-    assert answered["returned"] == 1
+    assert len(answered["units"]) == 1
     assert answered["units"][0]["text"] == (
         "always cite the commit that introduced a change"
     )
@@ -1350,7 +1425,7 @@ def test_a_repetition_in_other_words_is_collapsed_once_both_have_vectors(
         "the archive holds a fixture.",
         "the archive holds a fixture",
     ]
-    assert answered["returned"] == 1
+    assert len(answered["units"]) == 1
     collapsed = answered["collapsed_repetitions"]
     assert len(collapsed) == 1
     assert collapsed[0]["collapsed_by"] == "same meaning"
@@ -1407,7 +1482,7 @@ def test_the_repetition_threshold_is_a_setting_and_the_words_are_not(
             answered = engine.answer_both(
                 directories={"local": scope}, query="archive", limit=10
             )
-            return answered["returned"], [
+            return len(answered["units"]), [
                 str(item["collapsed_by"])
                 for item in answered.get("collapsed_repetitions", [])
             ]
@@ -1463,9 +1538,10 @@ def test_a_repetition_filed_in_both_memories_is_shown_once(tmp_path: Path) -> No
 
     answered = asyncio.run(scenario())
 
-    assert answered["scope_counts"] == {"local": 1, "global": 1}
-    assert answered["returned"] == 1
+    assert len(answered["units"]) == 1
     assert [unit["scope"] for unit in answered["units"]] == ["local"]
+    # The repetition was filed in both memories and the answer says which: the
+    # collapsed entry is how a caller knows a statement exists elsewhere.
     assert answered["collapsed_repetitions"][0]["scope"] == "global"
 
 

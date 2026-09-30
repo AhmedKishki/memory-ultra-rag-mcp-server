@@ -43,6 +43,8 @@ from config_ultra_rag_mcp import (
     user_config_path,
 )
 
+from .models import available_rerankers
+
 __all__ = [
     "SETTINGS",
     "SETTINGS_BY_KEY",
@@ -157,9 +159,10 @@ SETTINGS: tuple[Setting, ...] = (
         "rerank_depth",
         int,
         "retrieval",
-        "How many fused candidates the cross-encoder reads.",
+        "How many fused candidates the cross-encoder reads. One reranks every read; "
+        "a larger number reranks more of them, at about 5 ms a candidate.",
         env="MEMORY_ULTRARAG_RETRIEVAL_RERANK_DEPTH",
-        minimum=0.0,
+        minimum=1.0,
     ),
     Setting(
         "dense.embedding_model",
@@ -174,9 +177,11 @@ SETTINGS: tuple[Setting, ...] = (
         "reranker_model",
         str,
         "identity",
-        "The local cross-encoder that orders candidates, or empty for none.",
+        "The local cross-encoder that orders every read's candidates. Every read is "
+        "reranked, so the value must name one of the pinned models and there is no "
+        "empty one.",
         env="MEMORY_ULTRARAG_RERANKER_MODEL",
-        empty="",
+        choices=available_rerankers(),
     ),
 )
 
