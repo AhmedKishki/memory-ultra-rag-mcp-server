@@ -168,7 +168,6 @@ class Statement:
     position: int
     added_at: str | None = None
     recalls: int = 0
-    last_recalled_at: str | None = None
 
     @property
     def normalized(self) -> str:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,17 @@ from typing import Any
 from .index import MemoryIndex
 from .models import Embedder, ModelError
 from .vectors import VectorStore
+
+#: How long the worker waits for work when nothing is wrong. It bounds how long a
+#: stopped or idle worker notices `stop`, and nothing else.
+POLL_SECONDS = 0.25
+
+#: How long the worker waits before retrying a model it could not load. A model
+#: that cannot be fetched stays unavailable for minutes, so the wait is long
+#: enough to cost nothing and short enough that a model fetched by another process
+#: is picked up within the next write's lifetime. `submit` clears it, which is what
+#: makes the next write the retry rather than the timer.
+RETRY_SECONDS = 5.0
 
 __all__ = [
     "EmbeddingWorker",
@@ -61,8 +73,9 @@ class EmbeddingWorker:
     scope at a time here and a second worker would fight the first over the same
     SQLite file. A unit is embedded once: the queue is drained, the model is
     called with a batch, and the vectors are written. If the model is not
-    available the batch is put back and the queue is left alone, so the next
-    write or an explicit reindex retries it.
+    available the batch is put back and the worker waits before trying again, so
+    a missing model costs one wakeup per interval rather than a core, and the
+    next write or an explicit reindex clears the wait and retries at once.
     """
 
     def __init__(self, embedder: Embedder, scope_directory: Path) -> None:
@@ -77,6 +90,12 @@ class EmbeddingWorker:
         # puts the unit back and takes it out again, so `stop` waits out its whole
         # timeout and leaves a thread spinning on the failure.
         self._stopping = False
+        #: When the worker may try the model again, as a monotonic time. This is
+        #: what a retry waits on: a failed embed puts the unit back and returns,
+        #: and the loop below takes it out again only once this has passed. Without
+        #: it the thread re-tried a missing model as fast as it could fail, which
+        #: measured at over a million attempts in two seconds.
+        self._retry_after = 0.0
         self._idle.set()
 
     @property
@@ -98,9 +117,16 @@ class EmbeddingWorker:
             self._thread.start()
 
     def submit(self, unit: PendingUnit) -> None:
-        """Queue one unit for a vector, and wake the worker."""
+        """Queue one unit for a vector, and wake the worker.
+
+        A write is a reason to try the model now: whatever wait a previous failure
+        put in place is cleared, so a model that has become available again is
+        picked up by the next write rather than at the end of a backoff.
+        """
 
         self.start()
+        with self._lock:
+            self._retry_after = 0.0
         self._idle.clear()
         self._queue.put(unit)
 
@@ -114,7 +140,13 @@ class EmbeddingWorker:
         return self._idle.wait(timeout)
 
     def stop(self) -> None:
-        """Ask the worker to finish and wait for it."""
+        """Ask the worker to finish and wait for it.
+
+        Whatever is still queued is dropped, because the thread is gone and
+        nothing else reads that queue. Dropping a pending unit loses nothing: the
+        statement is in the record, and the next worker derives the missing
+        vectors from it rather than from this queue.
+        """
 
         if self._thread is None:
             return
@@ -122,11 +154,27 @@ class EmbeddingWorker:
         self._queue.put(None)
         self._thread.join(timeout=5.0)
         self._thread = None
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
 
     def _run(self) -> None:
         while True:
+            wait = self._retry_wait()
+            if wait:
+                # The unit is already back on the queue, so waiting on `get` would
+                # hand it straight back out: the wait has to happen before the take,
+                # or a missing model is retried as fast as it can fail. Sliced, so a
+                # `stop` is still heard within a poll.
+                if self._stopping:
+                    self._idle.set()
+                    return
+                time.sleep(min(wait, POLL_SECONDS))
+                continue
             try:
-                item = self._queue.get(timeout=0.25)
+                item = self._queue.get(timeout=POLL_SECONDS)
             except queue.Empty:
                 if self._queue.empty():
                     self._idle.set()
@@ -138,21 +186,31 @@ class EmbeddingWorker:
             if self._queue.empty():
                 self._idle.set()
 
+    def _retry_wait(self) -> float:
+        """Return how long is left of a retry wait, or zero when there is none."""
+
+        with self._lock:
+            return max(self._retry_after - time.monotonic(), 0.0)
+
     def _embed_one(self, unit: PendingUnit) -> None:
         try:
             vectors = self._embedder.embed_documents([unit.text])
         except ModelError:
-            # The model is not available. Put the unit back, stop pretending the
-            # queue is empty, and let a later write or a reindex retry it — unless
-            # the worker is stopping, because a unit put back behind the `None`
-            # at the end of the queue is one the thread would take out again and
-            # again, and `stop` would wait out its timeout and leave it spinning.
+            # The model is not available. Put the unit back, wait before the next
+            # attempt, and let a later write or a reindex retry it — unless the
+            # worker is stopping, because a unit put back behind the `None` at the
+            # end of the queue is one the thread would take out again and again,
+            # and `stop` would wait out its timeout and leave it spinning.
             if self._stopping:
                 self._idle.set()
                 return
             self._queue.put(unit)
             self._idle.clear()
+            with self._lock:
+                self._retry_after = time.monotonic() + RETRY_SECONDS
             return
+        with self._lock:
+            self._retry_after = 0.0
         if not vectors:
             return
         identity = self._embedder.identity

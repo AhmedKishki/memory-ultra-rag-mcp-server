@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from memory_ultra_rag_mcp.index import (
+    PRODUCTIVE_COLUMNS,
     SUPERSEDED_FILENAMES,
     MemoryIndex,
     index_path,
@@ -39,6 +40,28 @@ def _recalls(directory: Path, key: str) -> int:
         return int(index.history([key]).get(key, {}).get("recalls") or 0)
 
 
+def test_every_column_on_a_row_has_a_reader(tmp_path: Path) -> None:
+    """A statement is stored once and carries only what something reads.
+
+    The row used to hold the normalised words beside the words themselves, which
+    no code read, and a date for the last recall, which a read wrote on every
+    statement it returned and nothing ever read: two columns of storage and one
+    write per answered statement, for nothing. Every column left has one named
+    reader in `PRODUCTIVE_COLUMNS`, so adding another means naming what reads it.
+    """
+
+    with MemoryIndex(tmp_path) as index:
+        columns = {
+            str(record[1])
+            for record in index._open().execute("PRAGMA table_info(unit)")
+        }
+
+    assert columns == {"text", "unit_key"} | set(PRODUCTIVE_COLUMNS)
+    assert "normalized" not in columns, "the statement is stored twice"
+    for name in PRODUCTIVE_COLUMNS:
+        assert PRODUCTIVE_COLUMNS[name].strip(), f"{name} names no reader"
+
+
 def test_the_history_is_columns_of_the_record(tmp_path: Path) -> None:
     """One row per statement, so a statement cannot be half in one file and half in another."""
 
@@ -60,7 +83,7 @@ def test_the_history_is_columns_of_the_record(tmp_path: Path) -> None:
             "SELECT recalls, added_at IS NOT NULL FROM unit"
         ).fetchone()
 
-    assert {"added_at", "recalls", "last_recalled_at"} <= columns
+    assert {"kind", "stamp", "added_at", "recalls"} <= columns
     assert row[0] == 1
     assert row[1] == 1
     assert _recalls(tmp_path, key) == 1
@@ -81,7 +104,6 @@ def test_a_new_statement_is_dated_when_it_is_recorded(tmp_path: Path) -> None:
 
     assert record["added_at"]
     assert record["recalls"] == 0
-    assert record["last_recalled_at"] is None
 
 
 def test_recording_the_same_words_twice_keeps_the_first_date(tmp_path: Path) -> None:
@@ -123,7 +145,6 @@ def test_a_recall_is_counted_as_it_is_handed_over(tmp_path: Path) -> None:
     # The read that is answering you has counted itself, so the number is how many
     # times the statement was handed over rather than how many times before now.
     assert record["recalls"] == 3
-    assert record["last_recalled_at"]
 
 
 def test_counting_a_recall_touches_only_the_statements_answered(tmp_path: Path) -> None:
@@ -569,7 +590,16 @@ def test_a_renamed_column_keeps_the_kinds_the_file_held(tmp_path: Path) -> None:
         assert restored[0].position == 0
         assert restored[0].recalls == 4
         assert restored[0].added_at == "2026-09-01T00:00:00.000+00:00"
-        assert restored[0].last_recalled_at == "2026-09-02T00:00:00.000+00:00"
+        # The date a version-7 file kept of the last recall is not carried over: it
+        # was a column nothing read, and the statements it sat on are the ones
+        # being kept.
+        with MemoryIndex(tmp_path) as index:
+            columns = {
+                str(record[1])
+                for record in index._open().execute("PRAGMA table_info(unit)")
+            }
+        assert "last_recalled_at" not in columns
+        assert "normalized" not in columns
     finally:
         engine.close()
 

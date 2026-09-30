@@ -11,6 +11,7 @@ honest, which is what these tests are for.
 from __future__ import annotations
 
 import re
+import threading
 import zlib
 from collections.abc import Sequence
 
@@ -132,3 +133,23 @@ class FakeReranker:
             float(len(words & {word for word in item.casefold().split()}))
             for item in candidates
         ]
+
+
+class GatedEmbedder(FakeEmbedder):
+    """An embedder that waits for a test to let it finish.
+
+    A write queues its statement and returns, and the worker embeds it on its own
+    thread, so a test that wants to look at the record *before* that happens needs
+    the worker held. `gate` waits on `release`, and the number of batches it was
+    asked for is `batches`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+        self.batches = 0
+
+    def embed_documents(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
+        self.batches += 1
+        self.release.wait(5.0)
+        return super().embed_documents(texts)

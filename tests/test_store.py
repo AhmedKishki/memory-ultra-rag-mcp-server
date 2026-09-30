@@ -212,7 +212,6 @@ def test_a_statement_carries_its_own_record() -> None:
         position=0,
         added_at="2026-09-29T00:00:00.000+00:00",
         recalls=3,
-        last_recalled_at="2026-09-29T01:00:00.000+00:00",
     )
 
     assert statement.normalized == "a fact"

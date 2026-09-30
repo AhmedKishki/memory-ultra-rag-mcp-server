@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeEmbedder, FakeNearEmbedder, FakeReranker
+from fakes import FakeEmbedder, FakeNearEmbedder, FakeReranker, GatedEmbedder
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -203,7 +203,7 @@ def test_forgetting_finds_the_statement_in_whichever_memory_holds_it(
 
 def test_a_local_statement_is_written_into_the_project(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    embedder = FakeEmbedder()
+    embedder = GatedEmbedder()
     app = _app(config, embedder, duplicate_cosine=0.99)
 
     async def scenario() -> dict[str, Any]:

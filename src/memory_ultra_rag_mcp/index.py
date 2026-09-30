@@ -42,6 +42,7 @@ from .store import (
 
 __all__ = [
     "INDEX_FILENAME",
+    "PRODUCTIVE_COLUMNS",
     "SUPERSEDED_FILENAMES",
     "IndexError",
     "MemoryIndex",
@@ -71,8 +72,26 @@ RENDERED_FILENAME = "MEMORY.md"
 #: 5 brought the vectors in from their own file. 6 made ``unit`` the record
 #: itself — it gained the four columns the history table held, plus the normalised
 #: text that an exact match compares — and dropped that table, because a statement
-#: is one row and not two. 7 renamed that field from ``type`` to ``kind``.
-SCHEMA_VERSION = "7"
+#: is one row and not two. 7 renamed that field from ``type`` to ``kind``. 8
+#: dropped the two columns nothing read: the normalised copy of the words, which
+#: is the statement stored twice, and ``last_recalled_at``, which a read wrote on
+#: every statement it returned and no code ever read. What is left on a row is the
+#: statement, its identity, and the four facts that do work — see
+#: :data:`PRODUCTIVE_COLUMNS`.
+SCHEMA_VERSION = "8"
+
+#: Every column of a row except the statement and its identity, with the one thing
+#: that reads it. A column earns its place by being asked for, so a column added
+#: without naming its reader is a column a memory pays for and nobody uses, and
+#: ``tests/test_metadata.py`` fails if one appears. ``unit.text`` is the record and
+#: ``unit.unit_key`` is what the vector and the history are found by; neither needs
+#: a reader of its own.
+PRODUCTIVE_COLUMNS = {
+    "kind": "a read narrowed by kind, and the label its identity is computed from",
+    "stamp": "the order the document is written in, and the tie-break between memories",
+    "added_at": "the recency bonus, and the date a caller is told",
+    "recalls": "how often the memory has handed the statement back, which a caller judges by",
+}
 
 #: The vector table, and the columns this version writes. A table that does not
 #: have exactly these is dropped and rebuilt rather than half-read.
@@ -136,7 +155,7 @@ def read_unit_rows(path: Path) -> list[tuple[str, ...]] | None:
         ]
         rows: list[tuple[str, ...]] = []
         if wanted:
-            for name in ("added_at", "recalls", "last_recalled_at"):
+            for name in ("added_at", "recalls"):
                 if name in columns:
                     wanted.append(name)
             try:
@@ -467,7 +486,7 @@ class MemoryIndex:
         connection.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS unit USING fts5("
             "text, unit_key UNINDEXED, kind UNINDEXED, stamp UNINDEXED, "
-            "normalized UNINDEXED, added_at, recalls, last_recalled_at)"
+            "added_at, recalls)"
         )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)"
@@ -496,7 +515,7 @@ class MemoryIndex:
             connection.execute(
                 "CREATE VIRTUAL TABLE unit USING fts5("
                 "text, unit_key UNINDEXED, kind UNINDEXED, stamp UNINDEXED, "
-                "normalized UNINDEXED, added_at, recalls, last_recalled_at)"
+                "added_at, recalls)"
             )
         if current != SCHEMA_VERSION:
             # Only when it differs, so a read on a current file takes no write
@@ -535,7 +554,7 @@ class MemoryIndex:
         wanted = [
             name for name in ("text", "unit_key", source, "stamp") if name in columns
         ]
-        for name in ("added_at", "recalls", "last_recalled_at"):
+        for name in ("added_at", "recalls"):
             if name in columns:
                 wanted.append(name)
         query = ", ".join(wanted)
@@ -580,17 +599,15 @@ class MemoryIndex:
             history = row[4:]
             connection.execute(
                 "INSERT OR IGNORE INTO unit"
-                "(text, unit_key, kind, stamp, normalized, added_at, recalls, "
-                "last_recalled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(text, unit_key, kind, stamp, added_at, recalls) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     text,
                     key,
                     kind,
                     str(placed) if placed is not None else stamp,
-                    normalise(text),
                     history[0] if len(history) > 0 and history[0] else None,
                     int(history[1]) if len(history) > 1 and history[1] else 0,
-                    history[2] if len(history) > 2 and history[2] else None,
                 ),
             )
             if placed is not None:
@@ -623,8 +640,8 @@ class MemoryIndex:
 
         connection = self._open()
         rows = connection.execute(
-            "SELECT text, unit_key, kind, stamp, added_at, recalls, "
-            "last_recalled_at FROM unit ORDER BY CAST(stamp AS INTEGER)"
+            "SELECT text, unit_key, kind, stamp, added_at, recalls "
+            "FROM unit ORDER BY CAST(stamp AS INTEGER)"
         ).fetchall()
         return [
             Statement(
@@ -634,9 +651,8 @@ class MemoryIndex:
                 position=int(stamp or 0),
                 added_at=added_at or None,
                 recalls=int(recalls or 0),
-                last_recalled_at=last_recalled or None,
             )
-            for text, key, kind, stamp, added_at, recalls, last_recalled in rows
+            for text, key, kind, stamp, added_at, recalls in rows
         ]
 
     def statements_by_kind(self, kind: str) -> set[str]:
@@ -692,13 +708,12 @@ class MemoryIndex:
         connection.execute("DELETE FROM unit WHERE unit_key = ?", (key,))
         connection.execute(
             "INSERT INTO unit"
-            "(text, unit_key, kind, stamp, normalized, added_at, recalls, "
-            "last_recalled_at) VALUES (?, ?, ?, 0, ?, ?, ?, NULL)",
+            "(text, unit_key, kind, stamp, added_at, recalls) "
+            "VALUES (?, ?, ?, 0, ?, ?)",
             (
                 text,
                 key,
                 kind,
-                normalise(text),
                 when or (previous[0] if previous else None) or _now(),
                 int(previous[1] or 0) if previous else 0,
             ),
@@ -774,18 +789,15 @@ class MemoryIndex:
             connection.execute("DELETE FROM unit WHERE unit_key = ?", (statement.key,))
             connection.execute(
                 "INSERT INTO unit"
-                "(text, unit_key, kind, stamp, normalized, added_at, recalls, "
-                "last_recalled_at) VALUES (?, ?, ?, ?, ?, ?, ?, "
-                "(SELECT last_recalled_at FROM unit WHERE unit_key = ?))",
+                "(text, unit_key, kind, stamp, added_at, recalls) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     statement.text,
                     statement.key,
                     statement.kind,
                     str(position),
-                    normalise(statement.text),
                     added_at or _now(),
                     recalls,
-                    statement.key,
                 ),
             )
         connection.commit()
@@ -864,14 +876,13 @@ class MemoryIndex:
             seen.add(parsed.key)
             connection.execute(
                 "INSERT OR IGNORE INTO unit"
-                "(text, unit_key, kind, stamp, normalized, added_at, recalls, "
-                "last_recalled_at) VALUES (?, ?, ?, ?, ?, NULL, 0, NULL)",
+                "(text, unit_key, kind, stamp, added_at, recalls) "
+                "VALUES (?, ?, ?, ?, NULL, 0)",
                 (
                     parsed.text,
                     parsed.key,
                     parsed.kind,
                     str(parsed.position),
-                    normalise(parsed.text),
                 ),
             )
             adopted = True
@@ -899,26 +910,25 @@ class MemoryIndex:
 
     # -- a statement's history ------------------------------------------------
 
-    def note_recalled(self, keys: Sequence[str], *, when: str | None = None) -> None:
+    def note_recalled(self, keys: Sequence[str]) -> None:
         """Count that these statements were handed to a caller.
 
         One ``UPDATE`` per key inside the connection the read already holds, so
         the work is proportional to the answer rather than to the memory, and
-        SQLite's own transaction makes it atomic. A statement with a date is dated
-        by the write that recorded it; one this server never recorded is counted
-        without a date, because a re-read is not a time of writing.
+        SQLite's own transaction makes it atomic. A count is all this writes: a
+        read is not a time of writing, so a statement keeps the date of the write
+        that recorded it and nothing else.
         """
 
         wanted = [key for key in dict.fromkeys(keys) if key]
         if not wanted:
             return
-        stamp = when or _now()
         connection = self._open()
         for key in wanted:
             connection.execute(
-                "UPDATE unit SET recalls = CAST(recalls AS INTEGER) + 1, "
-                "last_recalled_at = ? WHERE unit_key = ?",
-                (stamp, key),
+                "UPDATE unit SET recalls = CAST(recalls AS INTEGER) + 1 "
+                "WHERE unit_key = ?",
+                (key,),
             )
         connection.commit()
 
@@ -934,15 +944,14 @@ class MemoryIndex:
             chunk = wanted[start : start + 500]
             placeholders = ",".join("?" * len(chunk))
             rows = connection.execute(
-                f"SELECT unit_key, added_at, recalls, last_recalled_at FROM unit "
+                f"SELECT unit_key, added_at, recalls FROM unit "
                 f"WHERE unit_key IN ({placeholders})",
                 chunk,
             ).fetchall()
-            for key, added_at, recalls, last_recalled in rows:
+            for key, added_at, recalls in rows:
                 found[str(key)] = {
                     "added_at": added_at or None,
                     "recalls": int(recalls or 0),
-                    "last_recalled_at": last_recalled,
                 }
         return found
 

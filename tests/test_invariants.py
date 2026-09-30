@@ -246,6 +246,56 @@ class _MissingModel:
         raise ModelError("the model is not available")
 
 
+class _CountingMissingModel(_MissingModel):
+    """The missing model again, counting how often it was asked."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed_documents(self, texts: list[str]) -> list[tuple[float, ...]]:
+        self.calls += 1
+        raise ModelError("the model is not available")
+
+
+def test_a_missing_model_is_asked_once_per_wait_rather_than_once_per_moment(
+    tmp_path: Path,
+) -> None:
+    """A model that cannot be fetched is a condition, not a busy loop.
+
+    The retry put the unit straight back on the queue and the worker took it out
+    again immediately, which measured at over a million attempts in two seconds —
+    a whole core for a statement that was never going to embed. The unit stays
+    queued for the next write, so the retry is what waits and not the unit.
+    """
+
+    model = _CountingMissingModel()
+    worker = EmbeddingWorker(model, tmp_path / "scope")
+    worker.submit(PendingUnit("key", "a statement", "ITEM", "0"))
+
+    time.sleep(1.0)
+
+    assert model.calls == 1, f"the model was asked {model.calls} times in one second"
+    # The unit is still pending, so the next write or a reindex finds it.
+    assert worker.pending == 1
+    worker.stop()
+
+
+def test_a_new_write_retries_a_missing_model_at_once(tmp_path: Path) -> None:
+    """The wait is what backs off, not the work: a write clears it immediately."""
+
+    model = _CountingMissingModel()
+    worker = EmbeddingWorker(model, tmp_path / "scope")
+    worker.submit(PendingUnit("key", "a statement", "ITEM", "0"))
+    time.sleep(0.5)
+    assert model.calls == 1
+
+    worker.submit(PendingUnit("other", "another statement", "ITEM", "0"))
+    time.sleep(0.5)
+
+    assert model.calls > 1, "a new write did not clear the retry wait"
+    worker.stop()
+
+
 def test_a_worker_stops_even_while_its_model_is_missing(tmp_path: Path) -> None:
     """A unit put back must not keep a stopped worker spinning.
 
