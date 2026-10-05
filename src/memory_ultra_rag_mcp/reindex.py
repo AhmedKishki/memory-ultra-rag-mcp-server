@@ -105,7 +105,8 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Write the rendering to this path instead of the scope's MEMORY.md. "
-            "A directory is filled with one file per scope."
+            "A run over both memories writes one file per scope into a directory "
+            "of that name, so name a directory rather than a file."
         ),
     )
     parser.add_argument(
@@ -127,15 +128,17 @@ def _export(
 ) -> str:
     """Write one scope's memory out as prose, and say where it went.
 
-    A path with a suffix is the file to write. A path without one is a directory
-    when the run covers more than one scope, so two scopes of a project cannot
-    write over each other's rendering.
+    One scope writes to the path it was given, whatever its name, because there is
+    nothing there for it to overwrite. Several scopes write one file each into a
+    directory, because two memories cannot share a rendering file and the local
+    scope's own name begins with a dot. ``main`` refuses the one case that cannot be
+    decided — a name that reads as a file and is not already a directory.
     """
 
     from .index import MemoryIndex
 
     destination = Path(arguments.export_to) if arguments.export_to else None
-    if destination is not None and (destination.suffix or total > 1):
+    if destination is not None and total > 1:
         destination.mkdir(parents=True, exist_ok=True)
         destination = destination / f"{scope_directory.name}.md"
     with MemoryIndex(scope_directory) as index:
@@ -212,6 +215,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 retrieval.worker_for(scope).stop()
 
     if arguments.export or arguments.export_to:
+        named = Path(arguments.export_to) if arguments.export_to else None
+        if (
+            named is not None
+            and named.suffix
+            and not named.is_dir()
+            and len(scopes) > 1
+        ):
+            # A path that is already a directory is one whatever it is called. A path
+            # that is not there yet and reads as a file cannot hold two renderings,
+            # and making a directory out of a name the caller gave as a file is not
+            # what they asked for either.
+            print(
+                "memory-ultra-rag-reindex: --export-to names one file, but this run "
+                "renders both memories; name a directory instead",
+                file=sys.stderr,
+            )
+            return 2
         for scope_directory, scope_report in zip(scopes, report["scopes"].values()):
             written = _export(scope_directory, arguments, len(scopes))
             scope_report["exported_to"] = written

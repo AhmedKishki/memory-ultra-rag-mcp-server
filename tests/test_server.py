@@ -521,15 +521,11 @@ def test_a_read_without_a_query_is_refused(tmp_path: Path) -> None:
         asyncio.run(scenario())
 
 
-def test_a_document_left_beside_the_record_is_retired_not_remembered(
-    tmp_path: Path,
-) -> None:
-    """A file from an older version is read once, for what it holds, and then removed.
+def test_a_document_beside_the_record_is_never_remembered(tmp_path: Path) -> None:
+    """A rendering is not part of the record, so no read imports it.
 
-    The record is the memory, so a document beside it is a second copy of the same
-    statements. Anything in it the record lacks is imported first, and then the
-    file goes: a scope holding both a document and a database is the symptom of an
-    installation two versions at once.
+    The record is the memory. A document beside it is a copy somebody asked for, and
+    importing it would make a read's answer depend on a file no write keeps current.
     """
 
     config = _config(tmp_path)
@@ -548,8 +544,6 @@ def test_a_document_left_beside_the_record_is_retired_not_remembered(
             return {"before": _statements(config.local_directory)}
 
     asyncio.run(scenario())
-    # The document is beside the record and not part of it: nothing has read it
-    # yet, so its statement is not in the record and it is still on disk.
     assert _statements(config.local_directory) == ["a recorded fact"]
     assert (config.local_directory / "MEMORY.md").exists()
 
@@ -563,8 +557,55 @@ def test_a_document_left_beside_the_record_is_retired_not_remembered(
             return answer | {"statements": _statements(config.local_directory)}
 
     answered = asyncio.run(after())
-    assert answered["statements"] == ["a recorded fact", "a hand-written statement"]
-    assert not (config.local_directory / "MEMORY.md").exists()
+    assert answered["statements"] == ["a recorded fact"]
+    assert "superseded_removed" not in answered
+    assert (config.local_directory / "MEMORY.md").exists()
+
+
+def test_forgetting_the_last_statement_survives_a_stale_rendering(
+    tmp_path: Path,
+) -> None:
+    """A forget has to mean it, including the last statement in the memory.
+
+    The rendering beside the record is written from it and nothing re-renders it
+    after a forget, so the forgotten statement is still in the file. A read that
+    imported it would put it straight back, and the caller would be told it was
+    gone.
+    """
+
+    config = _config(tmp_path)
+    app = _app(config, FakeEmbedder())
+
+    async def scenario() -> dict[str, Any]:
+        async with Client(app) as client:
+            await client.call_tool(
+                "record_memory",
+                {"content": "a doomed fact", "kind": "NOTE"},
+                raise_on_error=True,
+            )
+            # The rendering as it stood before the forget, which is what a file left
+            # on disk holds after one.
+            (config.local_directory / "MEMORY.md").write_text(
+                "# MEMORY\n\nNOTE: a doomed fact\n", encoding="utf-8"
+            )
+            forgotten = _data(
+                await client.call_tool(
+                    "forget_memory", {"text": "a doomed fact"}, raise_on_error=True
+                )
+            )
+            answered = _data(
+                await client.call_tool(
+                    "recall_memory", {"query": "doomed"}, raise_on_error=True
+                )
+            )
+            return forgotten | {"answer": answered}
+
+    answered = asyncio.run(scenario())
+
+    assert answered["status"] == "forgotten"
+    assert answered["answer"]["units"] == []
+    assert _statements(config.local_directory) == []
+    assert (config.local_directory / "MEMORY.md").is_file()
 
 
 def test_a_statement_adopted_from_an_export_is_counted_as_untyped(
@@ -593,15 +634,13 @@ def test_a_statement_adopted_from_an_export_is_counted_as_untyped(
     assert answered["units"][0]["kind"] == "ITEM"
 
 
-def test_a_read_reads_a_document_beside_the_record_and_then_removes_it(
+def test_a_read_is_not_changed_by_a_document_beside_the_record(
     tmp_path: Path,
 ) -> None:
-    """A document is a migration source, not a second copy of the memory.
+    """A statement is forgotten by `forget_memory` and by nothing else.
 
-    Whatever it holds that the record lacks is imported, and then the file goes. A
-    statement is forgotten by `forget_memory` and by nothing else: a read whose
-    answer depended on a file it did not read would be a read that quietly served
-    less because a line was cut somewhere else.
+    A read whose answer depended on a file it did not read would be a read that
+    quietly served more because a line was cut somewhere else.
     """
 
     config = _config(tmp_path)
@@ -625,11 +664,9 @@ def test_a_read_reads_a_document_beside_the_record_and_then_removes_it(
             return first | {"statements": _statements(config.local_directory)}
 
     answered = asyncio.run(scenario())
-    # The record answered for what it held, the document's statement was kept
-    # rather than obeyed or dropped, and the document is gone.
     assert [unit["text"] for unit in answered["units"]] == ["a doomed fact"]
-    assert answered["statements"] == ["a doomed fact", "something else entirely"]
-    assert not (config.local_directory / "MEMORY.md").exists()
+    assert answered["statements"] == ["a doomed fact"]
+    assert (config.local_directory / "MEMORY.md").is_file()
 
 
 def test_an_unchanged_read_removes_nothing_and_touches_nothing(
@@ -1509,6 +1546,45 @@ def test_the_repetition_threshold_is_a_setting_and_the_words_are_not(
     assert collapse_at(
         "other", "the archive parser lives in corpus_io.py", "NOTE", 0.99
     ) == (2, [])
+
+
+def test_a_statement_with_no_vector_is_not_collapsed_as_a_repetition(
+    tmp_path: Path,
+) -> None:
+    """A statement whose vector is not ready has no meaning to compare.
+
+    An absent vector read as a vector of zeroes puts every pending statement in one
+    answer within a cosine of every other one, so a read would report three
+    different statements as one thing said in three ways. `units_pending` says the
+    vectors are missing; the answer must not then pretend to have compared them.
+    """
+
+    from memory_ultra_rag_mcp.models import ModelError
+
+    class Unavailable(FakeEmbedder):
+        def embed_documents(self, texts: Any) -> Any:
+            raise ModelError("the model is not available")
+
+    config = _config(tmp_path)
+    scope = config.local_directory
+    engine = _engine(config, Unavailable(), duplicate_cosine=0.0)
+    try:
+        for number in range(3):
+            engine.record(
+                directory=scope,
+                content=f"pending statement number {number}",
+                kind="NOTE",
+            )
+
+        answered = engine.answer_both(
+            directories={"local": scope}, query="pending statement", limit=10
+        )
+    finally:
+        engine.close()
+
+    assert len(answered["units"]) == 3
+    assert "collapsed_repetitions" not in answered
+    assert answered["units_pending"] == 3
 
 
 def test_a_repetition_filed_in_both_memories_is_shown_once(tmp_path: Path) -> None:

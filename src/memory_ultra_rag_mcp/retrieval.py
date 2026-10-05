@@ -252,7 +252,17 @@ class Retrieval:
         except StoreError as error:
             raise ModelError(str(error)) from error
         with MemoryIndex(directory) as index:
+            # Read before the write: the rows are gone once `insert` returns.
+            replaced_keys = (
+                index.statements_by_kind(replace_kind) if replace_kind else set()
+            )
             _key, replaced = index.insert(statement, label, replace_kind=replace_kind)
+        if replaced_keys:
+            # A vector whose statement is gone is about nothing that exists, and it
+            # would make `units_pending` under-report while a real one waits.
+            identity = self.embedder.identity
+            with VectorStore(directory, identity.name, identity.dimension) as store:
+                store.forget(replaced_keys)
         embed_pending(directory, self.embedder, self.worker_for(directory))
         # What a write answers with is what it filed: the statement, the kind it
         # was filed under, and anything it removed to file it. The rest is

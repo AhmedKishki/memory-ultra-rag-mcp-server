@@ -1,50 +1,103 @@
-# AGENTS.md
+---
+name: AGENTS.md
+description: Stdio memory server fidelity, storage boundaries, and validation rules.
+---
 
-This is the engineering guide for agents working in this repository. Read it with `README.md`, which states what the server does.
+# Stdio memory server rules
 
 ## What this project is
 
-A stdio MCP face for **UltraRAG's memory**, in two kinds: local memory, kept inside the project the server is bound to, under `.memory-rag`, and global memory, kept in UltraRAG's shared storage tree. Both kinds are one standing document, `MEMORY.md`, written in UltraRAG's format by one implementation (`src/memory_ultra_rag_mcp/store.py`).
-
-The value of this project is *fidelity to UltraRAG's memory behaviour, with project isolation*. A change that makes the memory behave differently from upstream is a change to the product and belongs in the choice table in `README.md` before it belongs in the code.
+- UltraRAG-compatible memory over stdio MCP, bound to one project.
+- Local records live under `.memory-rag`; global records live under `<storage-root>/memory/default/`.
+  - `memory.sqlite3` is authoritative; `MEMORY.md` renders its statements in UltraRAG's format.
+- Document behavior differences from upstream in the `README.md` choice table before implementing them.
 
 ## Rules
 
-- **One implementation, two roots.** `store.py` holds the behaviour; the roots come from `config.py`. Add no second writer and no second format: a project's memory and a user's memory are the same shape on purpose.
-- **Keep the formats byte-identical to upstream.** `tests/fixtures/upstream/` holds files that UltraRAG's own server at the pinned revision produced, and `tests/test_fidelity.py` compares against them. Changing a fixture means changing `reference.py` and recording why.
-- **Never copy or vendor UltraRAG source.** The behaviour and the formats were taken from the pinned revision and reimplemented in original Python; the reference revision, its files, and its captured output are recorded in `reference.py` and the fixtures.
-- **Local memory stays inside the project.** It lives in `<project-root>/.memory-rag`, it is created there when it is first needed, and nothing writes a project's memory into the shared tree.
-- **Global memory stays in the storage tree, and has no user dimension.** `<storage-root>/memory/default/` is UltraRAG's own layout for the user it is given when none is named, which is what lets a UltraRAG UI show the same memory, and there is one such memory per account. No tool and no page request takes a user identifier; the directory name is a constant in `config.py`, not a parameter. The storage root is the account's home data directory unless `--storage-root`, `MEMORY_ULTRARAG_STORAGE_ROOT`, or `ULTRARAG_UI_STORAGE_ROOT` moves it; that order is the precedence, and it is implemented once, in `_selected_storage_root`.
-- **Validate before serving.** Configuration is resolved before any memory is touched: a project root that is not a directory fails loudly, and diagnostics go to stderr so stdout stays a clean MCP stream.
-- **A project is identified by the repository the server is bound to.** `--project-root` decides which project's memory is served, it is resolved before anything is touched, and the tools take no project argument. Do not add a project or user parameter to reach another scope: the isolation is the directory, and a parameter would turn it into something the code has to enforce.
-- **No store or index may import a model library.** Retrieval is written against the `Embedder` and `Reranker` seams in `models.py`; `store.py`, `index.py` and `vectors.py` must not import `fastembed`, `onnxruntime`, or `numpy`. That is what makes a model change a line of `default.toml` and keeps the whole test suite runnable with no model at all.
-- **A row carries only what something reads.** The columns of `unit` are the statement, its identity, and the four in `PRODUCTIVE_COLUMNS`, each declared with the one thing that reads it, and `tests/test_metadata.py` fails when a column appears without naming its reader. Two were removed for breaking that: the normalised copy of the words, which stored every statement twice for an exact match that compares in Python anyway, and `last_recalled_at`, which a read wrote on every statement it returned and nothing ever read. A record is not a place to keep a fact because it might be useful later; a column costs a write on every insert and a byte on every row, and "someone might want it" is not a reader. Do not add a column, a normalised copy, or a timestamp without naming its consumer here and in `PRODUCTIVE_COLUMNS`.
-- **A write is durable before it is derived, and never fails because of the lookup layer.** Put the row in the record, write the document out from it, then hand the statement to the worker. A model that cannot be fetched leaves the unit pending, the read says so, and the worker waits `RETRY_SECONDS` before asking again rather than spinning: a missing model must cost one attempt per interval, not a core, and `submit` clears the wait so the next write is the retry. Writes are serialised per scope by a POSIX lock on a file in the system temporary directory, keyed by the scope's path, so a record never lands in a document another record just rewrote and no lock file is ever left inside a memory.
-- **The semantic side is unmeasured.** No document in this package may claim a quality gain from it. Reranking is not optional: it runs on every read, its model is pinned to the table in `models.py`, an empty or unnamed value is refused by name before serving, and `retrieval.rerank_depth` bounds the candidates the cross-encoder reads without touching the ranking. Its accuracy here is unknown and the parameters in `retrieval.py` are the collection's measured ones from another server, adopted as a starting point. Changing the model needs a measurement first, and no setting may exist that turns it off.
-- **An answer carries a field only when that field has news.** The statements are the answer; beside them sit the conditions a caller has to act on (`units_pending`, `semantic_available`, `truncated`, `hint`) and the disclosures a caller could not otherwise account for (`superseded_removed`, `collapsed_repetitions`), each present only when it says something. A read does not publish the scores that ordered it, the side each statement was found by, its position in the document, how long the read took, the digests that identify it, or any count the caller could make for itself, and a write does not publish the key it filed under, the directory it went to, or the state of the embedding queue. Do not add a field because a diagnostic surface or a test would like it; the ranking travels beside the answer in `unit_keys`, `unit_scores`, and `unit_stamps` for exactly that reason. A tool answer that a caller cannot act on is a cost paid on every read and by every agent.
-- **A statement carries a kind, and there is no gap where one should be.** It is one run of block letters, held as a column of the record with the statement, and returned as a field of its own rather than as part of the returned text. It is **not** in the statement's words and must not be written into the document: a read narrows to a category with `kind`, and a query that merely names a category finds nothing, which is the honest answer rather than a broken one. The server defines no categories and interprets none. The parameter is optional and defaults to `ITEM`, so a caller that names none is still filed under something a read can find; a statement recovered from an export reads as `ITEM`, because an export holds no kinds. `HANDOFF` is reserved: a handoff is a statement under it, and the tools remove the previous one by that kind rather than by anything a caller passes.
-- **The newest statement is at the top, and a read prefers it by a number, not a rule.** The record is ordered newest first and the document is written out in that order, so a file a person opens reads in the order things happened. Recency is applied after the reranker as a multiplier of `RetrievalSettings.recency_bonus` of a statement's own score, by the recorded date and never by position — a file written before this change holds its oldest statement first, so a position there would mean the opposite of a recency. A statement with no recorded date gets no bonus rather than a wrong one. The default is ten per cent; do not describe it as a guarantee, and do not add a second recency rule elsewhere.
-- **The record is the record, and `MEMORY.md` is a rendering of it.** `memory.sqlite3` holds every statement, its kind, its position, its date, its count, and its vector, and is the same table the words are searched in. The document is rendered from it — by `--export`, and by the page on every request — and is never read back as memory. Do not write it on the way past a write, and do not read it as memory: two copies of the same statements is one too many, and the copy a person edits by hand is the one that drifts. A memory of an older version is recovered by reading the file it is in, and a rendering this server wrote is left until `--retire-document` asks for it to go.
-- **A file beside the record is read once, and only ever read.** A document left by a version that kept the file as the record is imported for anything the record lacks, and then removed, and the answer says so in `superseded_removed`. A file that cannot be read is left where it is rather than deleted on a guess, which is why a file that yields no rows and a file that cannot be opened are two different answers. A statement whose words match one the record already holds is not imported again, however its digest compares, because a rendering drops the kind and would otherwise arrive as a duplicate on every read.
-- **`memory.sqlite3` holds the index, the vectors, and the state together, and that is deliberate.** The three answer the same read, are keyed by the same statement digest, and were once three files with two schema versions between them, which is how a scope ends up holding a word index, a vector file, and a write-ahead file for each. One file means one version, one connection, and no way for two of them to disagree about one statement. A schema bump drops and rebuilds the word index and leaves the vectors and the history alone, and it restores the file's own rows rather than the document beside it, because an export holds statements and nothing else. The file is not purely derived, and any document that says otherwise is wrong: deleting it costs a re-read, a re-embedding, *and* the counts.
-- **Every tunable is a declared setting, and the layers are a stack.** `settings.py` declares each one and `default.toml` ships beside it, so a key in the code and a key a file may set cannot drift apart; a layer may only set a declared key, and an undeclared key is an error in every layer. Layers win per key, lowest first: the packaged file, the account's `config.toml` — the one that applies globally, because a memory is shared by every project — the project's own, a file named with `--config`, `MEMORY_ULTRARAG_*`, and `--set`. Every effective value reports the layer that supplied it, so `--print-config` says where a number came from rather than only what it is. Do not read a number anywhere else: a second copy of a default is a value that will differ.
-- **The layer stack is not this repository's.** `Setting`, the merge, the coercion every layer shares, the provenance, the three path helpers, and `describe_settings` live in the separately versioned `config-ultra-rag-mcp` library, pinned by commit, which the research server uses as well. This repository owns `SETTINGS` and its three derived maps, `EffectiveSettings` and its grouping, the packaged `default.toml`, the `MEMORY_ULTRARAG_*` name each setting declares, and the two directory names it resolves its own layers by. It imports the rest; `tests/test_architecture.py` fails if a copy of the machinery reappears here. Skew between this server's pin and the other server's is allowed and is not a bug: a floating or vendored dependency is what would break the rule that each server is independently installable. A new tunable is a registry entry and a `default.toml` line, never a change in the library.
-- **A setting is `identity`, `runtime`, or `retrieval`, and says what changing it costs.** An `identity` setting decides what a memory is made of and is written beside the statements it produced, so changing it means they are embedded again rather than compared across two spaces. A `runtime` setting chooses where something lives. A `retrieval` setting decides what a read admits and in what order. Two things stay in code on purpose and are not settings: the record's schema version, and the names and paths that make up a scope, because those are what makes two servers agree on where a memory is.
-- **The surface is four memory tools: `record_memory`, `recall_memory`, `forget_memory`, and `record_handoff`.** The verbs are the ones an agent reaches for, and the memory is an argument on the two that can be told apart, so the decision a caller makes is what to do and where it goes, never which of two tools that differ by a word in their name. `scope` is `local` or `global` and defaults to `local`. A recall searches both memories and ranks the results together; forgetting searches both and refuses an ambiguous text. UltraRAG's server base class registers a pipeline `build` tool as well; it belongs to a pipeline deployment and is not part of this surface. Add no other tool: a tool here that is not memory would be a feature this project does not own. The browser view adds no tool, and forgetting and the handoff are memory operations, so they are tools here rather than something an operator has to do by hand in a file.
-- **A repetition is collapsed in the answer, and never refused on a write.** Two wordings of one statement are within a hair of each other, and a memory that answers one question twice is a memory nobody can be sure of. The write is not the place to decide that: a write does not wait for a vector, so the same statement would be judged differently depending on what had been embedded, and a memory that refuses a write is a memory a caller cannot write to. So a recall collapses it instead, once, in the merged answer rather than in either scope's read, because the case that matters is one statement filed in both memories. Two tests in that order: the words first, which need no model and no vector and catch the case a caller is most likely to produce, then the cosine within `retrieval.duplicate_cosine` for the statement that says the same thing in other words. The best-ranked of a repeated pair is the one kept, and what was collapsed is returned in `collapsed_repetitions` with which test caught it, because a read that quietly returned three of five matches is a read the caller cannot account for. The work is the answer's own candidates, so a memory costs no more to read than a question is worth. The threshold is a setting and decides only the cosine part: words that are the same words are a repetition whatever it says, and a number no cosine can reach does not switch the check off, it decides that nothing is close enough. Do not add a second similarity rule elsewhere, and do not make this one advisory.
-- **A statement's destination is one argument, judged on substance.** `scope` is `local` — this project, inside the repository — or `global` — across projects, in the account's memory — and it defaults to `local`. The server names the two destinations and nothing else about the choice: which one a statement belongs in is read off what the user is asking for and how far they mean it to reach, which is a semantic judgement and is usually made on the substance rather than on the wording, because most prompts carry no marker of where a statement should go. Do not document a set of phrases that make a statement global, and do not build one into a check: an agent that waits for a marker files a user-wide rule in the project and the rule is then invisible everywhere else.
-- **Recall before recording, and forget what is contradicted.** A write that does not first ask what is already remembered produces a second copy of a known statement and leaves a contradicted one standing. The instructions carry that order and the tools are shaped for it: one recall across both memories, and a forget that takes the exact text a recall returned. Do not add a write path that skips the recall, and do not add a fuzzy forget to make the contradicted case easier — the cost of a memory that can lose two statements to one vague call is higher than the cost of a caller copying a text.
-- **This is not a UltraRAG pipeline node.** Ship no `build` tool, no `server.yaml` or `parameter.yaml` for UltraRAG's runner, no `output=` wiring annotations, and no dependency on UltraRAG's package. Memory here is the whole solution for a project and an account, served to agents over MCP and to people in the browser; a pipeline stage someone else wires is a different product.
-- **The view reaches memory only through this server.** `ui.py` is a thin adapter: it authorizes the scope a request names, then reads or writes through `store.py` and the memory tools. The shared UI package is given results, never a path, and it must stay unable to read `.memory-rag` or the storage tree.
-- **The UI package is pinned by commit** in `pyproject.toml`, and it is interface infrastructure with its own release history. Change the pin deliberately, run both suites, and record why in the commit message.
-- **The view's one write is the standing document.** A statement is recorded through a tool, not the page. Replacing the whole document is written atomically and is refused when the document changed since it was read. The page's round write is refused with a 409, because this memory keeps no dated exchanges.
-- **FTS5 is a requirement, and it is probed.** `main()` refuses to start without it, because a read would otherwise pass over every file a memory holds. `scripts/check_sqlite_fts5.py` is the check a user runs.
-- **Never depend on a sibling repository**, and never read another server's private state. Cross-server comparison belongs in the collection README, one level up.
-- **Document every choice.** `README.md` carries the choice table. A behaviour difference that is not in that table is a defect.
+### Isolation and fidelity
+
+- `store.py` owns one behavior and format for both roots; `config.py` owns locations.
+- Preserve byte-identical upstream rendering fixtures in `tests/fixtures/upstream/` and `tests/test_fidelity.py`.
+  - Fixture changes require updating `reference.py`, the reason, and attribution.
+  - Reimplement behavior in original Python; never vendor UltraRAG source.
+- Create local memory only when needed, inside `<project-root>/.memory-rag`; never copy it into global storage.
+- Keep global memory at `memory/default`, with no user identifier in tools or pages.
+- Storage-root priority: `--storage-root`, `MEMORY_ULTRARAG_STORAGE_ROOT`, `ULTRARAG_UI_STORAGE_ROOT`, then the account data directory.
+  - `_selected_storage_root` owns resolution.
+- Resolve configuration and validate the project directory before touching memory.
+  - Diagnostics go to stderr; stdout is MCP only.
+- `--project-root` binds the server; tools take no project or user parameter.
+- Never depend on a sibling repository or read its private state; comparisons belong to the collection README.
+
+### Records and derived state
+
+- Keep `store.py`, `index.py`, and `vectors.py` free of `fastembed`, `onnxruntime`, and `numpy`.
+  - Retrieval uses `models.py`'s `Embedder` and `Reranker` seams; tests need no models.
+- `unit` holds statement, identity, and `PRODUCTIVE_COLUMNS`.
+  - New columns, normalized copies, or timestamps need a named consumer here and in `PRODUCTIVE_COLUMNS`; `tests/test_metadata.py` enforces it.
+- Commit records before worker submission; lookup failure must never fail a durable write.
+  - Disclose pending units; retry missing models after `RETRY_SECONDS`, with `submit` clearing the wait.
+  - Serialize scope writes; keep any lock outside the memory directory.
+- `memory.sqlite3` holds statements, history, FTS5, and vectors; it is not a disposable cache.
+  - Schema migration preserves original rows, vectors, and history rather than restoring from a rendering.
+- Render `MEMORY.md` only when requested by `--export` or the page, never on an ordinary write.
+  - Do not reimport a stale rendering into an authoritative record.
+  - Preserve genuine legacy recovery and report retired files through `superseded_removed`.
+  - Keep unreadable legacy files; distinguish unreadable from valid empty input.
+  - Do not import duplicate statements merely because legacy digests differ.
+  - Keep a requested rendering until `--retire-document` removes it.
+- Refuse startup without FTS5; `scripts/check_sqlite_fts5.py` probes support.
+
+### Retrieval and tools
+
+- Expose only `record_memory`, `recall_memory`, `forget_memory`, and `record_handoff`.
+  - Writable scopes are `local` and `global`, defaulting to `local`.
+  - Recall ranks both scopes together; forgetting requires exact, unambiguous text.
+  - No browser-only tools, pipeline `build`, `server.yaml`, `parameter.yaml`, `output=` wiring, or UltraRAG package dependency.
+- Store uppercase kinds as columns, not prefixes in returned text or rendered prose.
+  - Kinds are caller-defined, defaulting to `ITEM`, including kindless legacy exports.
+  - Narrow reads through `kind`; category words alone need not match statement text.
+  - Reserve `HANDOFF` and replace the previous handoff by kind.
+- Recall before recording; forget contradicted statements by the exact recalled text.
+  - Choose local/global scope from substance and intended reach, never marker-phrase rules.
+  - Do not add fuzzy forgetting or a write workflow that skips recall.
+- Collapse repetition once across the merged answer, never refuse a write for similarity.
+  - Test exact words first, then vector cosine at `retrieval.duplicate_cosine`.
+  - Keep the best-ranked match and disclose the reason in `collapsed_repetitions`.
+  - Compare bounded answer candidates; do not add another similarity rule or make collapse advisory.
+  - The threshold affects only cosine; exact-word collapse remains mandatory.
+- Rerank every read using a pinned `models.py` model; reject empty or unnamed settings.
+  - `retrieval.rerank_depth` bounds scored candidates, not a separate ranking rule.
+- Apply recency after reranking using recorded dates and `RetrievalSettings.recency_bonus`, never document position.
+  - Missing dates get no bonus; newest statements render first.
+  - The default is ten percent, not a quality guarantee or another recency rule.
+- Semantic quality is unmeasured; claim no gain and measure before changing models.
+  - Borrowed retrieval parameters are starting values, not memory-quality evidence.
+- Tool answers include statements and only useful conditions or disclosures.
+  - `units_pending`, `semantic_available`, `truncated`, `hint`, `superseded_removed`, and `collapsed_repetitions` appear only when informative.
+  - Do not publish ranking scores, match branches, positions, timings, digests, inferable counts, write paths, or queue internals.
+  - Internal ranking arrays are `unit_keys`, `unit_scores`, and `unit_stamps`; diagnostics do not justify new tool fields.
+
+### Settings and browser view
+
+- Declare every tunable in `settings.py` and `default.toml`; reject undeclared keys in every layer.
+- Merge per key, low to high: packaged defaults, account `config.toml`, project config, `--config`, `MEMORY_ULTRARAG_*`, `--set`.
+  - Report provenance through `--print-config`; never duplicate default values elsewhere.
+- The current layer engine imports the commit-pinned `config-ultra-rag-mcp` library.
+  - This repository owns `SETTINGS`, its derived maps, `EffectiveSettings`, defaults, prefixes, and directory names.
+  - `tests/test_architecture.py` rejects copied layer machinery; a new tunable changes the local registry and default, not that library.
+  - Independent consumers may pin different commits; never float dependencies.
+- Settings declare change cost: `identity` requires re-embedding, `runtime` sets locations, `retrieval` changes admission/order.
+  - Schema versions and scope names/paths stay in code, not settings.
+- `ui.py` authorizes scope and calls server/store operations; the shared UI receives results, never memory paths.
+  - Keep the UI package commit-pinned; deliberate pin changes run both suites and state why.
+- The page replaces a whole standing document atomically with stale-read protection, not individual tool statements.
+  - Refuse dated round writes with HTTP 409.
 
 ## Working rule
 
-Commit and push after every change, without waiting to be asked. Run the commands below, commit the change with a message that says what it changes and why, and push to `origin main` before starting anything else. A change that is not on the remote is a change that is lost, and the submodule pointer in the collection cannot record a commit that is not there.
+- Run validation, commit, and push each change to `origin main` before starting the next.
+  - State what changed and why; update the collection pointer only after the child commit is remote.
 
 ## Canonical commands
 
@@ -58,8 +111,13 @@ uv build
 ULTRARAG_CHECKOUT=/ABSOLUTE/PATH/TO/UltraRAG uv run --frozen pytest -m upstream
 ```
 
-The suite needs no UltraRAG checkout, and the integration tests start the real stdio server twice: once per project, over one shared storage tree. The browser view's own suite drives the adapter in memory and the routes over a test client. The comparison test runs upstream's own memory server from a checkout when `ULTRARAG_CHECKOUT` names one, and skips otherwise.
+- Standard tests need no UltraRAG checkout.
+  - Integration starts two real stdio servers over separate projects and shared global storage.
+  - Browser tests exercise the adapter and HTTP routes.
+  - `ULTRARAG_CHECKOUT` enables upstream comparison; otherwise that test skips.
 
 ## Attribution
 
-Credit UltraRAG, its contributors, and the organizations the project names: THUNLP, NEUIR, OpenBMB, and AI9stars. Preserve the independent-project and no-endorsement statements, the Apache-2.0 `LICENSE`, and `NOTICE`. Any reference revision change requires recapturing the fixtures and a fresh attribution review.
+- Credit UltraRAG, its contributors, THUNLP, NEUIR, OpenBMB, and AI9stars.
+- Preserve the independent-project and no-endorsement statements, Apache-2.0 `LICENSE`, and `NOTICE`.
+- Reference revision changes require recapturing fixtures and reviewing attribution.

@@ -163,6 +163,55 @@ def test_the_standing_document_is_written_only_when_it_still_matches(
     assert read_document(config.local_directory) is None
 
 
+def test_saving_the_page_unchanged_keeps_every_statement_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """The editor must not re-file what it was handed.
+
+    The page is given a rendering, and a rendering carries no kinds: the statements
+    the tools filed under `NOTE` and `RULE` arrive as plain prose. Saving that back
+    without touching a word would file every statement as `ITEM` and reset every
+    date and count in the memory, report a successful save, and show an empty diff,
+    because the text the person was editing never held a kind in the first place.
+    """
+
+    config = _config(tmp_path)
+
+    async def scenario() -> dict:
+        async with Client(create_server(config)) as client:
+            for content, kind in (
+                ("the draft lives in docs/", "NOTE"),
+                ("always cite the commit", "RULE"),
+            ):
+                await client.call_tool(
+                    "record_memory", {"content": content, "kind": kind}
+                )
+            adapter = ui.MemoryUIAdapter(config, client)
+            read = await adapter.call("memory_standing", {"scope": "local"})
+            saved = await adapter.call(
+                "memory_standing_save",
+                {
+                    "scope": "local",
+                    "content": read["content"],
+                    "expected_sha256": read["sha256"],
+                },
+            )
+            return dict(saved)
+
+    saved = asyncio.run(scenario())
+
+    with MemoryIndex(config.local_directory) as index:
+        statements = index.statements()
+    assert saved["kept"] == 2
+    assert saved["added"] == 0
+    assert saved["removed"] == 0
+    assert {item.text: item.kind for item in statements} == {
+        "the draft lives in docs/": "NOTE",
+        "always cite the commit": "RULE",
+    }
+    assert all(item.added_at for item in statements)
+
+
 def test_a_statement_the_page_saves_is_queued_for_a_vector(tmp_path: Path) -> None:
     """The page and the tools share one retrieval, so a page write is not word-only.
 

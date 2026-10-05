@@ -1,4 +1,13 @@
+---
+name: 0001-extend-ultrarag-memory.md
+description: Historical decisions and amendments, retained as evidence rather than current instructions.
+---
+
 # ADR 0001: Extend UltraRAG's Memory, Do Not Replace It
+
+- Historical record: some tool, storage, and retrieval claims below are superseded.
+- Current behavior belongs to [README.md](../../README.md); engineering constraints belong to [AGENTS.md](../../AGENTS.md).
+- The recorded decisions and amendments below are preserved, not rewritten as current rules.
 
 **Purpose:** state what this server is an extension of, what the extension adds, and what is deliberately left alone, so the product is not re-decided from prose.
 

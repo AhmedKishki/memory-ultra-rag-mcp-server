@@ -9,6 +9,15 @@ the browser view, and ``README.md`` for the fidelity contract this package keeps
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
+
+#: The version is the distribution's, read from the one place that declares it.
+#: A copy here is a number that disagrees with ``pyproject.toml`` as soon as a
+#: release is cut, and a stdio server is asked for its version by its clients.
+try:
+    __version__ = _distribution_version("memory-ultra-rag-mcp")
+except PackageNotFoundError:  # a source tree that was never installed
+    __version__ = "0.0.0"
 
 __all__ = ["__version__"]

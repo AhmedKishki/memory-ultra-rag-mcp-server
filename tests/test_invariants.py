@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fakes import FakeEmbedder
+import pytest
+from fakes import FakeEmbedder, GatedEmbedder
 from fastmcp import Client
 
 from memory_ultra_rag_mcp import server
@@ -132,10 +133,15 @@ def test_the_ceiling_is_asserted_against_a_fake_reranker_and_says_so() -> None:
 
 
 def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
-    """Recording is asynchronous: the caller is answered before the vector is."""
+    """Recording is asynchronous: the caller is answered before the vector is.
+
+    The embedder is held at its gate, so what the test looks at between the write
+    and the release is the state the contract is about rather than a race with the
+    worker's own thread.
+    """
 
     config = _scope(tmp_path)
-    embedder = FakeEmbedder()
+    embedder = GatedEmbedder()
     engine = _engine(config, embedder)
     app = server.create_server(config, retrieval=engine, warm=False)
 
@@ -148,22 +154,33 @@ def test_a_write_queues_rather_than_embeds(tmp_path: Path) -> None:
             )
 
     recorded = asyncio.run(scenario())
-    # The statement is durable now; the vector is the worker's problem.
-    with MemoryIndex(config.local_directory) as index:
-        assert [item.text for item in index.statements()] == ["a fact"]
-    # The answer says what was filed and nothing about the vector queue: the queue
-    # is the server's own work, and the fact it left is visible in the record.
-    assert recorded == {
-        "scope": "local",
-        "status": "recorded",
-        "kind": "NOTE",
-        "text": "a fact",
-    }
-    with VectorStore(
-        config.local_directory, embedder.identity.name, embedder.identity.dimension
-    ) as store:
-        assert store.count() == 0
-    engine.worker_for(config.local_directory).drain(5.0)
+    try:
+        # The statement is durable now; the vector is the worker's problem.
+        with MemoryIndex(config.local_directory) as index:
+            assert [item.text for item in index.statements()] == ["a fact"]
+        # The answer says what was filed and nothing about the vector queue: the
+        # queue is the server's own work, and the fact it left is in the record.
+        assert recorded == {
+            "scope": "local",
+            "status": "recorded",
+            "kind": "NOTE",
+            "text": "a fact",
+        }
+        identity = embedder.identity
+        with VectorStore(
+            config.local_directory, identity.name, identity.dimension
+        ) as store:
+            assert store.count() == 0
+
+        embedder.release.set()
+        engine.worker_for(config.local_directory).drain(5.0)
+
+        with VectorStore(
+            config.local_directory, identity.name, identity.dimension
+        ) as store:
+            assert store.count() == 1
+    finally:
+        engine.close()
     # What gets embedded is the statement alone. The type is a column now rather
     # than a prefix in the text, so it is not part of the vector: a query for a
     # category asks for the column instead of searching for a word.
@@ -195,6 +212,93 @@ def test_a_write_touches_only_what_it_wrote(tmp_path: Path) -> None:
         "note 0 about the draft"
     )
     assert not (directory / "MEMORY.md").exists()
+
+
+def test_a_handoff_leaves_nothing_behind_for_the_handoff_it_replaced(
+    tmp_path: Path,
+) -> None:
+    """A statement the record no longer holds must not go on holding a vector.
+
+    A handoff removes the previous one by its kind, and the vector table is a
+    separate table in the same file: without this the file grew by one embedding
+    every time a session ended, and `units_pending` — which is the count of
+    statements the vector table is short of — under-reported while a real
+    statement waited for its own vector.
+    """
+
+    config = _scope(tmp_path)
+    directory = config.local_directory
+    embedder = FakeEmbedder()
+    engine = _engine(config, embedder)
+    try:
+        for session in range(3):
+            engine.handoff(directory, f"session {session}: the corpus parses")
+            engine.worker_for(directory).drain(5.0)
+
+        with MemoryIndex(directory) as index:
+            units = index.count_units()
+        with VectorStore(
+            directory, embedder.identity.name, embedder.identity.dimension
+        ) as store:
+            vectors = store.count()
+    finally:
+        engine.close()
+
+    assert units == 1
+    assert vectors == units
+
+
+def test_a_failure_is_said_once_per_run_of_failures(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A condition is not a per-attempt event.
+
+    A model that cannot be fetched is retried on an interval for as long as the
+    process runs, so a line every attempt turns something a person has to act on
+    into noise they learn to scroll past. One line is said per run of failures; a
+    new write is a new run, because the new write is what somebody is waiting on.
+    """
+
+    monkeypatch.setattr("memory_ultra_rag_mcp.maintenance.RETRY_SECONDS", 0.2)
+    model = _CountingMissingModel()
+    worker = EmbeddingWorker(model, tmp_path / "scope")
+    worker.submit(PendingUnit("key", "a statement", "ITEM", "0"))
+    time.sleep(1.0)
+    worker.stop()
+
+    assert model.calls > 2, f"the worker tried {model.calls} times, not repeatedly"
+    assert capsys.readouterr().err.count("stays pending") == 1
+
+
+def test_a_lookup_failure_leaves_the_unit_pending_and_the_worker_running(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failure of the lookup layer must not take the queue with it.
+
+    The unit was taken out of the queue and the thread died with it, so the next
+    write was queued for a thread that no longer existed: the record kept every
+    statement and the meaning side of that process was off for the rest of its life,
+    with a traceback on the only channel a stdio server may use. The failure is
+    reported, the statement stays pending, and the worker keeps waiting for a
+    reason to try again.
+    """
+
+    scope = tmp_path / "not-a-directory"
+    scope.write_text("a file where a scope directory belongs")
+    worker = EmbeddingWorker(FakeEmbedder(), scope)
+    try:
+        worker.submit(PendingUnit("key", "a statement", "NOTE", "0"))
+        assert worker.drain(1.0) is False
+
+        assert worker.pending == 1
+        worker.submit(PendingUnit("other", "another statement", "NOTE", "0"))
+        assert worker.pending == 2
+    finally:
+        worker.stop()
+
+    assert "stays pending" in capsys.readouterr().err
 
 
 def test_the_vectors_can_be_thrown_away_and_rebuilt(tmp_path: Path) -> None:

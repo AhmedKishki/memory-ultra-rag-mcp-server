@@ -16,6 +16,7 @@ import pytest
 
 from memory_ultra_rag_mcp.index import (
     INDEX_FILENAME,
+    SUPERSEDED_FILENAMES,
     MemoryIndex,
     fts5_available,
     index_path,
@@ -25,9 +26,9 @@ from memory_ultra_rag_mcp.store import (
     SEED,
     Statement,
     parse_document,
-    read_document,
     unit_key,
 )
+from memory_ultra_rag_mcp.vectors import VectorStore
 
 
 def _scope(tmp_path: Path) -> Path:
@@ -308,20 +309,19 @@ def test_a_document_is_adopted_by_a_record_with_nothing_in_it(
 
     # Asked to, it goes — and a file that still held a statement would not.
     with MemoryIndex(scope) as index:
-        assert index.retire_superseded(render=True) == [EXPORT_FILENAME]
+        assert index.retire_superseded(retire_render=True) == [EXPORT_FILENAME]
     assert not (scope / EXPORT_FILENAME).exists()
     with MemoryIndex(scope) as index:
         assert index.count_units() == 2
 
 
-def test_a_document_beside_the_record_is_read_for_its_words_and_removed(
-    tmp_path: Path,
-) -> None:
-    """Whatever it holds that the record lacks is kept, and then the file goes.
+def test_a_rendering_beside_a_live_record_is_left_alone(tmp_path: Path) -> None:
+    """A rendering is not a second copy of the memory, and a read leaves it be.
 
-    A memory used to be two databases and a document, all three read into the
-    record. Leaving them behind is what made a scope look like two versions of
-    itself at once, so they are read and removed, and the answer says so.
+    A rendering is written from the record and nothing re-renders it on a write or
+    a forget, so every statement the record no longer holds is missing from it.
+    Reading it would put every forgotten statement back, and removing it would
+    throw away words the record never had.
     """
 
     scope = _scope(tmp_path)
@@ -331,12 +331,11 @@ def test_a_document_beside_the_record_is_read_for_its_words_and_removed(
     )
 
     with MemoryIndex(scope) as index:
-        retired = index.retire_superseded()
-        restored = [item.text for item in index.statements()]
+        assert index.retire_superseded() == []
+        assert [item.text for item in index.statements()] == ["a recorded fact"]
+        assert index.retire_superseded(retire_render=True) == [EXPORT_FILENAME]
 
-    assert retired == [EXPORT_FILENAME]
     assert not (scope / EXPORT_FILENAME).exists()
-    assert restored == ["a recorded fact", "a statement only the document knew"]
 
 
 def test_rendering_is_stable_for_an_unchanged_record(tmp_path: Path) -> None:
@@ -423,6 +422,92 @@ def test_a_document_holding_one_statement_twice_stores_it_once(tmp_path: Path) -
         assert index.export().count("prefers tabs over spaces") == 1
 
 
+def test_saving_a_document_unchanged_keeps_every_statement_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """The page's own rendering must not re-file what it was handed.
+
+    A rendering carries no kinds, so the statements the record filed under `NOTE`
+    and `RULE` come back as plain prose and are parsed as `ITEM`. A save that took
+    that at face value would turn every statement in the memory into `ITEM` and
+    reset every date and count in it, without the person having changed a word —
+    and the diff would be empty, because the file they were editing never held a
+    kind in the first place.
+    """
+
+    scope = _scope(tmp_path)
+    _add(scope, "the draft lives in docs/", "NOTE")
+    _add(scope, "always cite the commit", "RULE")
+
+    with MemoryIndex(scope) as index:
+        index.note_recalled(list(index.unit_keys()))
+        before = {
+            item.text: (item.kind, item.added_at, item.recalls)
+            for item in index.statements()
+        }
+        rendered = index.export()
+
+        report = index.replace_all(parse_document(rendered))
+
+        after = {
+            item.text: (item.kind, item.added_at, item.recalls)
+            for item in index.statements()
+        }
+
+    assert report == {"kept": 2, "added": 0, "removed": 0, "vectors_removed": 0}
+    assert after == before
+
+
+def test_a_kind_the_document_names_is_honoured_over_the_one_the_record_holds(
+    tmp_path: Path,
+) -> None:
+    """Preserving the record's kind is for a document that says nothing.
+
+    A rendering carries no kind, so the record's own is the truth about the
+    statement. A document written with `KIND: ` prefixes is a person naming the
+    kind, and that is the one the record takes.
+    """
+
+    scope = _scope(tmp_path)
+    _add(scope, "cite the commit", "NOTE")
+
+    with MemoryIndex(scope) as index:
+        report = index.replace_all(
+            parse_document("# MEMORY\n\nRULE: cite the commit\n")
+        )
+
+        assert report["kept"] == 0
+        assert report["added"] == 1
+        assert report["removed"] == 1
+        assert [item.kind for item in index.statements()] == ["RULE"]
+
+
+def test_a_document_holding_one_statement_twice_is_edited_into_one_row(
+    tmp_path: Path,
+) -> None:
+    """A repeated line in the editor is one statement, and the counts say so.
+
+    The count is what a page shows after a save, so a document holding two lines of
+    one statement must not report two statements added: the row is written once,
+    and the numbers have to describe the record rather than the text that arrived.
+    """
+
+    scope = _scope(tmp_path)
+    _add(scope, "prefers tabs over spaces", "NOTE")
+
+    with MemoryIndex(scope) as index:
+        report = index.replace_all(
+            parse_document(
+                "# MEMORY\n\nprefers tabs over spaces\n\nprefers tabs over spaces\n"
+            )
+        )
+
+        assert index.count_units() == 1
+        assert report["kept"] == 1
+        assert report["added"] == 0
+        assert index.export().count("prefers tabs over spaces") == 1
+
+
 def test_a_vector_file_this_version_cannot_read_is_left_where_it_is(
     tmp_path: Path,
 ) -> None:
@@ -474,21 +559,357 @@ def test_a_vector_file_this_version_can_read_is_removed(tmp_path: Path) -> None:
 def test_a_retired_file_does_not_import_a_statement_the_record_already_holds(
     tmp_path: Path,
 ) -> None:
-    """Two files holding one statement import it once, and the second file's is
-    recognised as already held rather than arriving as a second row."""
+    """A statement the record already holds is recognised, not imported again."""
 
     scope = _scope(tmp_path)
-    _add(scope, "the same words in both files", "NOTE")
+    words = "the same words in both files"
+    _add(scope, words, "NOTE")
+    stale = scope / SUPERSEDED_FILENAMES[0]
+    only_the_file = "only the old index knows this"
+    with sqlite3.connect(stale) as connection:
+        connection.execute(
+            "CREATE VIRTUAL TABLE unit USING fts5("
+            "text, unit_key UNINDEXED, type UNINDEXED, stamp UNINDEXED)"
+        )
+        connection.executemany(
+            "INSERT INTO unit(text, unit_key, type, stamp) VALUES (?, ?, ?, ?)",
+            [
+                (words, unit_key(f"NOTE: {words}"), "NOTE", "0"),
+                (only_the_file, unit_key(f"PLAN: {only_the_file}"), "PLAN", "1"),
+            ],
+        )
+        connection.commit()
+
+    with MemoryIndex(scope) as index:
+        assert index.retire_superseded() == [SUPERSEDED_FILENAMES[0]]
+        texts = [item.text for item in index.statements()]
+
+    assert texts == [words, only_the_file]
+
+
+def test_a_statement_imported_from_a_retired_file_keeps_its_identity(
+    tmp_path: Path,
+) -> None:
+    """An imported statement is the statement the old file described.
+
+    Identity is the words *and* the kind, and a retired database carries both, so
+    its own key is the one the record takes. Recomputing a digest from the words
+    alone produced a key no write would ever produce again, and recording those
+    words a second time then arrived as a second row of one statement: a recall
+    answered it twice and a forget refused it as ambiguous.
+    """
+
+    scope = _scope(tmp_path)
+    _add(scope, "a statement the record already holds", "NOTE")
+    stale = scope / SUPERSEDED_FILENAMES[0]
+    words = "a statement only the old index knows"
+    with sqlite3.connect(stale) as connection:
+        connection.execute(
+            "CREATE VIRTUAL TABLE unit USING fts5("
+            "text, unit_key UNINDEXED, type UNINDEXED, stamp UNINDEXED)"
+        )
+        connection.execute(
+            "INSERT INTO unit(text, unit_key, type, stamp) VALUES (?, ?, ?, ?)",
+            (words, unit_key(f"PLAN: {words}"), "PLAN", "9"),
+        )
+        connection.commit()
+
+    with MemoryIndex(scope) as index:
+        assert index.retire_superseded() == [SUPERSEDED_FILENAMES[0]]
+        assert index.unit_keys() == {
+            unit_key("NOTE: a statement the record already holds"),
+            unit_key(f"PLAN: {words}"),
+        }
+
+        index.insert(words, "PLAN")
+
+        assert index.count_units() == 2
+        assert [item.text for item in index.statements()].count(words) == 1
+
+
+def test_a_retired_file_of_vectors_is_not_read_as_statements(tmp_path: Path) -> None:
+    """A vector row is a digest, and a digest is not a statement.
+
+    A file of the superseded name could be a vector table rather than a word index.
+    Reading its rows as statements would file a 64-character hex string in the
+    memory as though a person had written it, so a file with no words in it is
+    read as holding nothing.
+    """
+
+    scope = _scope(tmp_path)
+    _add(scope, "a statement the record already holds", "NOTE")
+    stale = scope / SUPERSEDED_FILENAMES[0]
+    with sqlite3.connect(stale) as connection:
+        connection.execute(
+            "CREATE TABLE vector(unit_key TEXT, stamp TEXT, kind TEXT, model TEXT, "
+            "dimension INTEGER, components BLOB)"
+        )
+        connection.execute(
+            "INSERT INTO vector VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                unit_key("PLAN: a statement only the old index holds"),
+                "0",
+                "PLAN",
+                "fake/model",
+                4,
+                sqlite3.Binary(b"\x00\x00\x00\x00" * 4),
+            ),
+        )
+        connection.commit()
+
+    with MemoryIndex(scope) as index:
+        index.retire_superseded()
+
+        assert [item.text for item in index.statements()] == [
+            "a statement the record already holds"
+        ]
+
+
+def test_a_retired_file_lacking_an_identity_column_is_read_by_position(
+    tmp_path: Path,
+) -> None:
+    """A file that is missing a column has nothing in it, not a shifted column.
+
+    The rows are read by position, so a file of the shape `text, type, stamp` used
+    to put the stamp where the kind belongs and filed the statement under its own
+    place in the document. Every row comes back in one shape now, whatever the file
+    holds, and the statement keeps the kind the file gave it.
+    """
+
+    scope = _scope(tmp_path)
+    _add(scope, "a statement the record already holds", "NOTE")
+    stale = scope / SUPERSEDED_FILENAMES[0]
+    words = "a statement from a file with no identity column"
+    with sqlite3.connect(stale) as connection:
+        connection.execute(
+            "CREATE VIRTUAL TABLE unit USING fts5(text, type UNINDEXED, stamp UNINDEXED)"
+        )
+        connection.execute(
+            "INSERT INTO unit(text, type, stamp) VALUES (?, ?, ?)", (words, "NOTE", "4")
+        )
+        connection.commit()
+
+    with MemoryIndex(scope) as index:
+        assert index.retire_superseded() == [SUPERSEDED_FILENAMES[0]]
+        imported = next(item for item in index.statements() if item.text == words)
+
+        assert imported.kind == "NOTE"
+        assert imported.key == unit_key(f"NOTE: {words}")
+
+        index.insert(words, "NOTE")
+
+        assert index.count_units() == 2
+
+
+def test_an_emptied_record_is_not_read_again_from_the_rendering(
+    tmp_path: Path,
+) -> None:
+    """An empty record and an uninitialised one are different states.
+
+    A record whose last statement was forgotten is empty and authoritative. A
+    rendering beside it still holds those words, because nothing re-renders it after
+    a forget, so re-reading it would put back what was just removed — and the record
+    file is what tells the two states apart, since nothing else is written down.
+    """
+
+    scope = _scope(tmp_path)
+    _add(scope, "a doomed fact", "NOTE")
+    with MemoryIndex(scope) as index:
+        index.write_render()
+        index.drop(unit_key("NOTE: a doomed fact"))
+
+    with MemoryIndex(scope) as index:
+        assert index.count_units() == 0
+        assert index.adopt_document_if_empty() == 0
+        assert [item.text for item in index.statements()] == []
+
+    assert (scope / EXPORT_FILENAME).is_file()
+
+
+def test_a_memory_with_no_record_yet_is_recovered_from_its_file(
+    tmp_path: Path,
+) -> None:
+    """First initialisation still reads the file beside it, and makes it durable."""
+
+    scope = _scope(tmp_path)
     (scope / EXPORT_FILENAME).write_text(
-        "# MEMORY\n\nthe same words in both files\n\nonly the document knows this\n",
+        "# MEMORY\n\nthe draft lives in docs/\n\nalways cite the commit\n",
         encoding="utf-8",
     )
 
     with MemoryIndex(scope) as index:
-        assert index.retire_superseded() == [EXPORT_FILENAME]
-        texts = [item.text for item in index.statements()]
+        assert index.adopt_document_if_empty() == 2
 
-    assert texts == ["the same words in both files", "only the document knows this"]
+    # A second process, with nothing of the first one's connection left.
+    with MemoryIndex(scope) as index:
+        assert [item.text for item in index.statements()] == [
+            "the draft lives in docs/",
+            "always cite the commit",
+        ]
+        assert index.adopt_document_if_empty() == 0
+
+
+def test_a_commit_that_fails_leaves_the_source_file_alone(tmp_path: Path) -> None:
+    """The rows are committed before the file is removed, not after.
+
+    SQLite holds a write until something commits it, and closing throws the rest
+    away. A commit wrapped in a handler would swallow the failure and unlink the
+    file anyway, so the only copy of those statements would be gone and nothing
+    would say so.
+    """
+
+    scope = _scope(tmp_path)
+    words = "a statement only the old index knows"
+    stale = scope / SUPERSEDED_FILENAMES[0]
+    with sqlite3.connect(stale) as connection:
+        connection.execute(
+            "CREATE VIRTUAL TABLE unit USING fts5("
+            "text, unit_key UNINDEXED, type UNINDEXED, stamp UNINDEXED)"
+        )
+        connection.execute(
+            "INSERT INTO unit(text, unit_key, type, stamp) VALUES (?, ?, ?, ?)",
+            (words, unit_key(f"PLAN: {words}"), "PLAN", "0"),
+        )
+        connection.commit()
+
+    with (
+        pytest.raises(sqlite3.DatabaseError),
+        MemoryIndex(scope) as index,
+        refusing_commits(index),
+    ):
+        index.retire_superseded()
+
+    # The rows went back with the exception, and the only copy of those statements
+    # is still there for the next read to import.
+    assert stale.is_file()
+    with MemoryIndex(scope) as reopened:
+        assert reopened.count_units() == 0
+        assert reopened.retire_superseded() == [SUPERSEDED_FILENAMES[0]]
+        assert reopened.count_units() == 1
+
+
+def test_a_commit_that_fails_on_close_is_raised(tmp_path: Path) -> None:
+    """A write that cannot be made durable is reported, not discarded quietly."""
+
+    scope = _scope(tmp_path)
+    index = MemoryIndex(scope)
+    index.insert("a fact", "NOTE")
+
+    with refusing_commits(index), pytest.raises(sqlite3.DatabaseError):
+        index.close()
+
+        assert index._connection is None
+
+
+def test_an_operation_that_raises_is_rolled_back_and_the_file_closed(
+    tmp_path: Path,
+) -> None:
+    """A half-finished operation leaves nothing behind, and nothing locked."""
+
+    scope = _scope(tmp_path)
+    _add(scope, "a recorded fact", "NOTE")
+
+    with pytest.raises(RuntimeError), MemoryIndex(scope) as index:
+        # An uncommitted write, which is the state a failed operation leaves.
+        index._open().execute(
+            "INSERT INTO unit(text, unit_key, kind, stamp) VALUES (?, ?, ?, ?)",
+            ("half-finished", unit_key("NOTE: half-finished"), "NOTE", "0"),
+        )
+        raise RuntimeError("the operation did not finish")
+
+    with MemoryIndex(scope) as index:
+        assert [item.text for item in index.statements()] == ["a recorded fact"]
+
+
+def test_a_write_is_durable_once_the_block_that_made_it_is_closed(
+    tmp_path: Path,
+) -> None:
+    """Closing without a commit throws the write away, so close commits."""
+
+    scope = _scope(tmp_path)
+    index = MemoryIndex(scope)
+    index.insert("a fact", "NOTE")
+    index.close()
+
+    with MemoryIndex(scope) as reopened:
+        assert [item.text for item in reopened.statements()] == ["a fact"]
+
+
+class _RefusingCommit:
+    """One connection whose commits fail, the way a full disk makes them fail."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._connection, name)
+
+    def commit(self) -> None:
+        raise sqlite3.DatabaseError("database or disk is full")
+
+
+class refusing_commits:
+    """Stand a failing connection in front of one index for the length of a block.
+
+    SQLite's connection object refuses attribute assignment, so the failure is
+    injected by wrapping it rather than by patching the method on it.
+    """
+
+    def __init__(self, index: MemoryIndex) -> None:
+        self.index = index
+        self.real = index._open()
+
+    def __enter__(self) -> MemoryIndex:
+        self.index._connection = _RefusingCommit(self.real)  # type: ignore[assignment]
+        return self.index
+
+    def __exit__(self, *_: object) -> None:
+        self.index._connection = self.real  # type: ignore[assignment]
+
+
+def test_a_rebuild_keeps_the_statements_the_history_and_the_vectors(
+    tmp_path: Path,
+) -> None:
+    """A rebuild rebuilds the index over the words, which is the only derived part.
+
+    The record is the file, and the file holds the words, the kinds, the positions,
+    the dates, the counts and the vectors. Dropping it to rebuild would lose the
+    memory rather than recover it, and nothing beside it could put it back.
+    """
+
+    from memory_ultra_rag_mcp.index import rebuild
+
+    scope = _scope(tmp_path)
+    _add(scope, "the draft lives in docs/", "NOTE")
+    _add(scope, "always cite the commit", "RULE")
+    with MemoryIndex(scope) as index:
+        index.note_recalled(list(index.unit_keys()))
+        before = [
+            (item.text, item.kind, item.added_at, item.recalls)
+            for item in index.statements()
+        ]
+        key = index.unit_keys().pop()
+    with VectorStore(scope, "fake/model", 4) as store:
+        store.put(key, (0.1, 0.2, 0.3, 0.4), stamp="0", kind="NOTE")
+
+    assert rebuild(scope) == {"units": 2}
+
+    with MemoryIndex(scope) as index:
+        after = [
+            (item.text, item.kind, item.added_at, item.recalls)
+            for item in index.statements()
+        ]
+        found, _mode = index.search("draft commit", 10)
+        assert [item.text for item in index.statements()] == [
+            text for text, *_rest in after
+        ]
+    with VectorStore(scope, "fake/model", 4) as store:
+        assert store.count() == 1
+    assert after == before
+    assert {row["text"] for row in found} == {
+        "the draft lives in docs/",
+        "always cite the commit",
+    }
 
 
 def test_a_search_falls_back_when_the_conjunction_is_too_strict(
@@ -509,24 +930,32 @@ def test_a_search_falls_back_when_the_conjunction_is_too_strict(
     assert all_words != []
 
 
-def test_a_record_answers_through_a_document_being_retired(tmp_path: Path) -> None:
-    """A document is read for what it holds, then removed, and the record answers."""
+def test_a_record_answers_through_a_retired_file(tmp_path: Path) -> None:
+    """A database is read and removed, and the record answers the same either way."""
 
     scope = _scope(tmp_path)
     _add(scope, "the draft lives in docs/", "NOTE")
-    (scope / EXPORT_FILENAME).write_text(
-        "# MEMORY\n\nNOTE: something else entirely\n", encoding="utf-8"
-    )
+    only_the_file = "something only the old file knew"
+    stale = scope / SUPERSEDED_FILENAMES[0]
+    with sqlite3.connect(stale) as connection:
+        connection.execute(
+            "CREATE VIRTUAL TABLE unit USING fts5("
+            "text, unit_key UNINDEXED, type UNINDEXED, stamp UNINDEXED)"
+        )
+        connection.execute(
+            "INSERT INTO unit(text, unit_key, type, stamp) VALUES (?, ?, ?, ?)",
+            (only_the_file, unit_key(f"PLAN: {only_the_file}"), "PLAN", "9"),
+        )
+        connection.commit()
 
     with MemoryIndex(scope) as index:
         found, _mode = index.search("draft", 10)
         retired = index.retire_superseded()
         statements = [item.text for item in index.statements()]
 
-    # The file is gone, what it held is kept, and the record still answers.
-    assert retired == [EXPORT_FILENAME]
-    assert not (scope / EXPORT_FILENAME).exists()
-    assert statements == ["the draft lives in docs/", "something else entirely"]
+    assert retired == [SUPERSEDED_FILENAMES[0]]
+    assert not stale.exists()
+    assert statements == ["the draft lives in docs/", only_the_file]
     assert [row["text"] for row in found] == ["the draft lives in docs/"]
 
 
@@ -549,6 +978,3 @@ def _rendered(scope: Path) -> str:
 
     with MemoryIndex(scope) as index:
         return index.export()
-
-    assert parse_document(_rendered(scope))
-    assert read_document(scope).startswith("# MEMORY")

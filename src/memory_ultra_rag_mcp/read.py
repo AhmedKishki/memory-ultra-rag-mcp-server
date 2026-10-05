@@ -131,6 +131,10 @@ def collapse_repetitions(
     the answer holds, which is the caller's `limit` and not the size of the memory,
     so a large memory costs no more to read than a small one.
 
+    A statement whose vector is not ready is not compared by cosine: there is
+    nothing to compare, and an absent vector read as zeroes would put every pending
+    statement within reach of every other one.
+
     The dropped statements are returned as well, because a read that quietly
     returned three of five matches is a read the caller cannot account for.
     """
@@ -144,7 +148,7 @@ def collapse_repetitions(
         if any(normalized == held for held in kept_text):
             collapsed.append({**stated, "collapsed_by": "same words"})
             continue
-        if vector is not None:
+        if vector:
             score = _nearest(vector, kept_vectors, threshold)
             if score is not None:
                 collapsed.append(
@@ -155,7 +159,7 @@ def collapse_repetitions(
             break
         kept.append(stated)
         kept_text.append(normalized)
-        if vector is not None:
+        if vector:
             kept_vectors.append(vector)
     return kept, collapsed
 

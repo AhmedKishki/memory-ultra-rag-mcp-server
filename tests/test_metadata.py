@@ -290,10 +290,15 @@ def test_a_document_is_recovered_by_an_empty_record(tmp_path: Path) -> None:
     assert [item.kind for item in statements] == ["NOTE", "PLAN"]
 
 
-def test_a_document_left_beside_the_record_is_read_and_then_removed(
+def test_a_hand_written_rendering_beside_the_record_is_not_read(
     tmp_path: Path,
 ) -> None:
-    """A rendering is not the memory, and one holding new words is kept and read."""
+    """A rendering beside a live record is left where the person put it.
+
+    The record is the memory, so a document beside it is neither a source to import
+    nor a second copy to clean up. Importing it would put back every statement a
+    forget removed, since nothing re-renders the file after a forget.
+    """
 
     engine = _engine()
     try:
@@ -306,12 +311,10 @@ def test_a_document_left_beside_the_record_is_read_and_then_removed(
         with MemoryIndex(tmp_path) as index:
             statements = [item.text for item in index.statements()]
 
-        # The record answered for what it held, the document's own statement was
-        # kept rather than dropped, and the file is gone.
         assert len(answer["units"]) == 1
-        assert statements == ["a recorded fact", "something a person typed by hand"]
-        assert "MEMORY.md" in answer["superseded_removed"]
-        assert not (tmp_path / "MEMORY.md").exists()
+        assert statements == ["a recorded fact"]
+        assert "superseded_removed" not in answer
+        assert (tmp_path / "MEMORY.md").is_file()
     finally:
         engine.close()
 
